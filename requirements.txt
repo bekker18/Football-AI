@@ -1,0 +1,23 @@
+# Torch CPU wheels. For GPU, see README (swap to the cu121 index + torch build).
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.3.1
+torchvision==0.18.1
+
+# Pinned to versions known-compatible with roboflow/sports' soccer example.
+# numpy<2 keeps the numba/umap/opencv ABI stack happy.
+numpy<2
+ultralytics==8.2.103
+supervision==0.25.1
+transformers==4.49.0
+umap-learn==0.5.6
+scikit-learn==1.5.2
+opencv-python-headless==4.10.0.84
+pillow
+sentencepiece
+protobuf
+tqdm
+
+# Asset download + tabular output
+gdown==5.2.0
+pandas==2.2.3
+pyarrow==17.0.0

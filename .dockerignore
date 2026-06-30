@@ -1,0 +1,35 @@
+# Keep the build context small — none of this is needed inside the image.
+# (The Dockerfile only copies the source files it names.)
+
+# Large / generated data
+data/
+output/
+*.pt
+*.mp4
+*.avi
+*.mov
+*.mkv
+hf_cache/
+
+# Git & project meta
+.git/
+.gitignore
+.dockerignore
+README.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

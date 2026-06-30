@@ -5,7 +5,7 @@ goalkeepers / referees (+ optional ball), each with a team label and a position
 in **pitch metres**. Built on `roboflow/sports` (YOLOv8 detection, ByteTrack,
 SigLIP+UMAP+KMeans team assignment, homography). You only need Docker.
 
-The upstream repo only _renders annotated video_; this project adds a custom
+The upstream repo only *renders annotated video*; this project adds a custom
 extractor that writes the actual data (parquet / csv / jsonl) plus an optional
 annotated video for eyeballing.
 
@@ -42,12 +42,12 @@ docker compose run --rm extract --source /data/mygame.mp4 --ball
 
 ## Outputs (in `./output`)
 
-| file                                | shape                       | contents                                               |
-| ----------------------------------- | --------------------------- | ------------------------------------------------------ |
-| `tracking.parquet` / `tracking.csv` | one row per (frame, object) | the main artifact                                      |
-| `frames.jsonl`                      | one line per frame          | same data, objects nested per frame                    |
-| `meta.json`                         | —                           | fps, resolution, pitch dims, pinned versions, run args |
-| `annotated.mp4`                     | —                           | only with `--save-video`                               |
+| file | shape | contents |
+|------|-------|----------|
+| `tracking.parquet` / `tracking.csv` | one row per (frame, object) | the main artifact |
+| `frames.jsonl` | one line per frame | same data, objects nested per frame |
+| `meta.json` | — | fps, resolution, pitch dims, pinned versions, run args |
+| `annotated.mp4` | — | only with `--save-video` |
 
 Per-row columns: `frame, time_s, object_id, role, team, img_x, img_y,
 pitch_x_m, pitch_y_m, pitch_valid, bbox_x1..bbox_y2`.
@@ -90,7 +90,7 @@ testing but slow (1280px YOLO + SigLIP). For real runs use a GPU:
   SHA to freeze). If upstream changes its API you may need to bump pins.
 - Models cache to `./data` (checkpoints + `hf_cache` for SigLIP), so re-runs
   don't re-download. Output files are written as root (container default); `sudo
-chown` them if needed.
+  chown` them if needed.
 
 ## Hand-off to Layer 2
 

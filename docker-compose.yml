@@ -1,0 +1,38 @@
+# Usage:
+#   docker compose build
+#   docker compose run --rm download                      # one-time: models + sample clip
+#   docker compose run --rm extract                       # runs on the sample clip
+#   docker compose run --rm extract --source /data/mygame.mp4 --ball --save-video /output/annot.mp4
+#
+# All paths inside the container: videos & models in /data, results in /output.
+
+services:
+  download:
+    build: .
+    entrypoint: ["bash", "download_assets.sh"]
+    volumes:
+      - ./data:/data
+
+  extract:
+    build: .
+    volumes:
+      - ./data:/data
+      - ./output:/output
+    # Default command (override anything after `extract` on the CLI).
+    command: ["--source", "/data/2e57b9_0.mp4", "--out-dir", "/output", "--device", "cpu"]
+
+  # GPU variant — requires NVIDIA Container Toolkit on the host (more than "just
+  # Docker"). Build with the cu121 torch index (see README) before using this.
+  extract-gpu:
+    build: .
+    volumes:
+      - ./data:/data
+      - ./output:/output
+    command: ["--source", "/data/2e57b9_0.mp4", "--out-dir", "/output", "--device", "cuda"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
