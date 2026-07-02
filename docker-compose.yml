@@ -10,6 +10,11 @@
 services:
   download:
     build: .
+    # Docker keeps everything flat under the /data mount; override the script's
+    # default (models/ + data/raw/) so checkpoints and footage land there.
+    environment:
+      - MODELS_DIR=/data/models
+      - RAW_DIR=/data/raw
     entrypoint: ["bash", "download_assets.sh"]
     volumes:
       - ./data:/data

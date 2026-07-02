@@ -1,30 +1,37 @@
 #!/usr/bin/env bash
-# Downloads the three YOLO checkpoints (player / pitch / ball) into <DST>/models
-# and one sample broadcast clip into <DST>/raw. Runs inside the container; <DST>
-# is bind-mounted, so assets persist on the host and are fetched only once.
+# Downloads the three YOLO checkpoints (player / pitch / ball) into <ROOT>/models
+# and one sample broadcast clip into <ROOT>/data/raw -- the repo's committed
+# layout (models/ at the project root, footage under data/raw/).
+#
+# ROOT is the first argument and defaults to this script's own directory (the
+# project root), so it works regardless of the current working directory:
+#   bash download_assets.sh /kaggle/working/Football-AI
+#
+# The two destinations can also be overridden independently via MODELS_DIR /
+# RAW_DIR -- Docker uses this to keep its flat /data/{models,raw} layout.
 set -euo pipefail
 
-DST="${1:-/data}"
-MODELS="$DST/models"   # checkpoints
-RAW="$DST/raw"         # input footage (data)
+ROOT="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+MODELS="${MODELS_DIR:-$ROOT/models}"    # checkpoints
+RAW="${RAW_DIR:-$ROOT/data/raw}"        # input footage (data)
 mkdir -p "$MODELS" "$RAW"
 
-dl () {  # dl <output-path-relative-to-DST> <gdrive-id>
-  if [[ -s "$DST/$1" ]]; then
+dl () {  # dl <output-path> <gdrive-id>
+  if [[ -s "$1" ]]; then
     echo "✓ $1 already present, skipping"
   else
     echo "↓ downloading $1 ..."
-    gdown -O "$DST/$1" "https://drive.google.com/uc?id=$2"
+    gdown -O "$1" "https://drive.google.com/uc?id=$2"
   fi
 }
 
 # Checkpoints (from roboflow/sports examples/soccer/setup.sh) -> models/
-dl models/football-player-detection.pt 17PXFNlx-jI7VjVo_vQnB1sONjRyvoB-q
-dl models/football-pitch-detection.pt  1Ma5Kt86tgpdjCTKfum79YMgNnSjcoOyf
-dl models/football-ball-detection.pt   1isw4wx-MK9h9LMr36VvIWlJD6ppUvw7V
+dl "$MODELS/football-player-detection.pt" 17PXFNlx-jI7VjVo_vQnB1sONjRyvoB-q
+dl "$MODELS/football-pitch-detection.pt"  1Ma5Kt86tgpdjCTKfum79YMgNnSjcoOyf
+dl "$MODELS/football-ball-detection.pt"   1isw4wx-MK9h9LMr36VvIWlJD6ppUvw7V
 
-# One sample broadcast clip to test end to end -> raw/ (input data)
-dl raw/2e57b9_0.mp4 19PGw55V8aA6GZu5-Aac5_9mCy3fNxmEf
+# One sample broadcast clip to test end to end -> data/raw/ (input data)
+dl "$RAW/2e57b9_0.mp4" 19PGw55V8aA6GZu5-Aac5_9mCy3fNxmEf
 
-echo "All assets under $DST:"
-ls -lhR "$DST"
+echo "Checkpoints in $MODELS, footage in $RAW:"
+ls -lhR "$MODELS" "$RAW"
