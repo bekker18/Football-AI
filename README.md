@@ -12,35 +12,35 @@ annotated video for eyeballing.
 ## Quick start
 
 ```bash
-mkdir -p data output          # bind-mount targets
+mkdir -p data/raw data/gamestate    # bind-mount targets (all under ./data)
 docker compose build
-docker compose run --rm download         # ~one-time: 3 checkpoints + sample clip → ./data
-docker compose run --rm extract          # runs on the sample clip → ./output
+docker compose run --rm download         # ~one-time: checkpoints → ./data/models, sample clip → ./data/raw
+docker compose run --rm extract          # runs on the sample clip → ./data/gamestate
 ```
 
-Run on your own footage (drop the file in `./data` first):
+Run on your own footage (drop the file in `./data/raw` first):
 
 ```bash
 docker compose run --rm extract \
-  --source /data/mygame.mp4 \
-  --out-dir /output \
-  --save-video /output/annotated.mp4      # optional sanity-check overlay
+  --source /data/raw/mygame.mp4 \
+  --out-dir /data/gamestate \
+  --save-video /data/gamestate/annotated.mp4   # optional sanity-check overlay
 ```
 
 Fast smoke test (cap frames, coarser fit sampling):
 
 ```bash
-docker compose run --rm extract --source /data/mygame.mp4 --max-frames 300 --stride-fit 30
+docker compose run --rm extract --source /data/raw/mygame.mp4 --max-frames 300 --stride-fit 30
 ```
 
 Enable ball detection (off by default — slow on CPU, and Layer 2 / Door 2 is
 ball-free-friendly):
 
 ```bash
-docker compose run --rm extract --source /data/mygame.mp4 --ball
+docker compose run --rm extract --source /data/raw/mygame.mp4 --ball
 ```
 
-## Outputs (in `./output`)
+## Outputs (in `./data/gamestate`)
 
 | file | shape | contents |
 |------|-------|----------|
@@ -92,7 +92,7 @@ testing but slow (1280px YOLO + SigLIP). For real runs use a GPU:
 2. In `requirements.txt` swap the torch index/build to CUDA, e.g.
    `--extra-index-url https://download.pytorch.org/whl/cu121` with matching
    `torch`/`torchvision` cu121 wheels, then `docker compose build`.
-3. `docker compose run --rm extract-gpu --source /data/mygame.mp4`.
+3. `docker compose run --rm extract-gpu --source /data/raw/mygame.mp4`.
 
 ## Notes & caveats
 
@@ -104,9 +104,45 @@ testing but slow (1280px YOLO + SigLIP). For real runs use a GPU:
 - **Reproducibility**: the image pins the Python stack and checks out
   `roboflow/sports` at `--build-arg SPORTS_REF` (default `main`; pass a commit
   SHA to freeze). If upstream changes its API you may need to bump pins.
-- Assets cache under `./data` (checkpoints in `./data/models/`, SigLIP weights in
-  `./data/hf_cache/`), so re-runs don't re-download. Output files are written as
-  root (container default); `sudo chown` them if needed.
+- Everything lives under `./data`: input footage in `./data/raw/`, checkpoints in
+  `./data/models/`, SigLIP weights in `./data/hf_cache/`, and results in
+  `./data/gamestate/`. Assets download once. Output files are written as root
+  (container default); `sudo chown` them if needed.
+
+## Project layout
+
+The logic lives in the `src` package (installable via `pyproject.toml`);
+`main.py` is a thin launcher.
+
+```
+src/
+  config.py      class ids, pitch geometry, coordinate-system constants
+  geometry.py    homography build + image→pitch-metres conversion
+  detection.py   player/jersey crop helpers for the team classifier
+  teams.py       goalkeeper assignment + per-track majority vote
+  ball.py        optional tiled ball detector (BallDetector)
+  annotate.py    optional annotated-video overlay (VideoAnnotator)
+  outputs.py     writing parquet/csv/jsonl/meta + version capture
+  pipeline.py    run(args): the two-phase extraction orchestration
+  cli.py         argument parser + entry point
+main.py                 thin launcher -> src.cli:main (Kaggle-friendly)
+tests/                  unit tests for the pure logic (teams, geometry)
+```
+
+Run it three equivalent ways:
+
+```bash
+python main.py    --source ... --out-dir ...   # launcher (no install)
+python -m src.cli --source ... --out-dir ...   # module
+football-ai       --source ... --out-dir ...   # console script (after pip install .)
+```
+
+Dev setup and tests (the pure-logic tests need only numpy + pytest, not the CV stack):
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
 
 ## Hand-off to Layer 2
 

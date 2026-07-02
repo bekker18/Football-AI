@@ -2,9 +2,10 @@
 #   docker compose build
 #   docker compose run --rm download                      # one-time: models + sample clip
 #   docker compose run --rm extract                       # runs on the sample clip
-#   docker compose run --rm extract --source /data/mygame.mp4 --ball --save-video /output/annot.mp4
+#   docker compose run --rm extract --source /data/raw/mygame.mp4 --ball --save-video /data/gamestate/annot.mp4
 #
-# All paths inside the container: videos & models in /data, results in /output.
+# Everything lives under one bind mount (./data): input footage in /data/raw,
+# checkpoints in /data/models, results in /data/gamestate.
 
 services:
   download:
@@ -17,9 +18,8 @@ services:
     build: .
     volumes:
       - ./data:/data
-      - ./output:/output
     # Default command (override anything after `extract` on the CLI).
-    command: ["--source", "/data/2e57b9_0.mp4", "--out-dir", "/output", "--device", "cpu"]
+    command: ["--source", "/data/raw/2e57b9_0.mp4", "--out-dir", "/data/gamestate", "--device", "cpu"]
 
   # GPU variant — requires NVIDIA Container Toolkit on the host (more than "just
   # Docker"). Build with the cu121 torch index (see README) before using this.
@@ -27,8 +27,7 @@ services:
     build: .
     volumes:
       - ./data:/data
-      - ./output:/output
-    command: ["--source", "/data/2e57b9_0.mp4", "--out-dir", "/output", "--device", "cuda"]
+    command: ["--source", "/data/raw/2e57b9_0.mp4", "--out-dir", "/data/gamestate", "--device", "cuda"]
     deploy:
       resources:
         reservations:

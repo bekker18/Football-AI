@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "football-ai"
+version = "0.1.0"
+description = "Layer 1 CV extraction: soccer video -> structured per-frame game state"
+requires-python = ">=3.10"
+# The heavy, ABI-sensitive dependencies (torch, ultralytics, supervision, umap,
+# scikit-learn, ...) are pinned in requirements.txt and installed separately so
+# their versions are not disturbed by this package. Intentionally left empty.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+football-ai = "src.cli:main"
+
+[tool.setuptools]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+# Let `pytest` import the package from the repo root without an install first.
+pythonpath = ["."]
+testpaths = ["tests"]

@@ -1,9 +1,14 @@
 # --- project data & artifacts (large / generated) ---
 # Keep the folders (Docker bind mounts need them) but ignore their contents.
+# Outputs now land in data/gamestate/ (one mount for everything).
 data/*
-output/*
 !data/.gitkeep
-!output/.gitkeep
+!data/raw/
+data/raw/*
+!data/raw/.gitkeep
+!data/gamestate/
+data/gamestate/*
+!data/gamestate/.gitkeep
 
 *.pt              # YOLO checkpoints
 *.mp4             # videos

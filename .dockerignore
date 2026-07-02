@@ -3,7 +3,6 @@
 
 # Large / generated data
 data/
-output/
 *.pt
 *.mp4
 *.avi

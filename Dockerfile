@@ -33,9 +33,15 @@ RUN git clone https://github.com/roboflow/sports.git /opt/sports \
     && cd /opt/sports && git checkout "$SPORTS_REF" \
     && pip install --no-deps -e /opt/sports
 
-COPY extract_game_state.py download_assets.sh ./
+# Install our package (registers the `football-ai` console script). --no-deps
+# keeps the pinned requirements above untouched (pyproject declares no deps).
+COPY pyproject.toml ./
+COPY src ./src
+COPY main.py download_assets.sh ./
+RUN pip install --no-deps .
 
 # Disable ultralytics analytics/telemetry chatter.
 RUN yolo settings sync=False 2>/dev/null || true
 
-ENTRYPOINT ["python", "extract_game_state.py"]
+# `football-ai --source ... --out-dir ...` (the download service overrides this).
+ENTRYPOINT ["football-ai"]
