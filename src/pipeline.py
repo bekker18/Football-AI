@@ -114,6 +114,7 @@ def run(args) -> None:
             tid = int(referees.tracker_id[i]) if referees.tracker_id is not None else -1
             add("referee", None, tid, referees.xyxy[i])
 
+        bdet = None
         if ball_detector is not None:
             bdet = ball_detector.detect(frame)
             for i in range(len(bdet)):
@@ -130,7 +131,8 @@ def run(args) -> None:
 
         if annotator is not None:
             annotator.write(
-                frame, players, goalkeepers, referees, players_team, gk_team, transformer
+                frame, players, goalkeepers, referees, players_team, gk_team,
+                transformer, bdet,
             )
 
         bar.update(1)

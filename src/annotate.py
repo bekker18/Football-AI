@@ -28,28 +28,44 @@ class VideoAnnotator:
         self.ellipse = sv.EllipseAnnotator(
             color=sv.ColorPalette.from_hex(self.COLORS), thickness=2
         )
+        # The ball is tiny on 1080p; a white triangle above it reads far better
+        # than a ~10px box. Swap for sv.BoxAnnotator(...) if you want a box.
+        self.ball_annotator = sv.TriangleAnnotator(
+            color=sv.Color.WHITE, base=25, height=21, outline_thickness=1
+        )
         self.sink = sv.VideoSink(path, info)
         self.sink.__enter__()
 
-    def _radar(self, merged, lookup, transformer):
+    def _radar(self, merged, lookup, transformer, ball=None):
         sv = self._sv
         radar = self._draw_pitch(config=self._pitch)
-        if transformer is None or len(merged) == 0:
+        if transformer is None:
             return radar
-        xy = merged.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
-        txy = transformer.transform_points(xy)
-        for i, hexc in enumerate(self.COLORS):
+        if len(merged):
+            xy = merged.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
+            txy = transformer.transform_points(xy)
+            for i, hexc in enumerate(self.COLORS):
+                radar = self._draw_points(
+                    config=self._pitch,
+                    xy=txy[lookup == i],
+                    face_color=sv.Color.from_hex(hexc),
+                    radius=20,
+                    pitch=radar,
+                )
+        if ball is not None and len(ball):
+            bxy = ball.get_anchors_coordinates(sv.Position.BOTTOM_CENTER)
             radar = self._draw_points(
                 config=self._pitch,
-                xy=txy[lookup == i],
-                face_color=sv.Color.from_hex(hexc),
+                xy=transformer.transform_points(bxy),
+                face_color=sv.Color.WHITE,
                 radius=20,
                 pitch=radar,
             )
         return radar
 
     def write(
-        self, frame, players, goalkeepers, referees, players_team, gk_team, transformer
+        self, frame, players, goalkeepers, referees, players_team, gk_team,
+        transformer, ball=None,
     ):
         sv = self._sv
         from .config import UNKNOWN_COLOR_IDX
@@ -68,7 +84,9 @@ class VideoAnnotator:
             annotated = self.ellipse.annotate(
                 annotated, merged, custom_color_lookup=lookup
             )
-        radar = self._radar(merged, lookup, transformer)
+        if ball is not None and len(ball):
+            annotated = self.ball_annotator.annotate(annotated, ball)
+        radar = self._radar(merged, lookup, transformer, ball)
         radar = sv.resize_image(radar, (self.info.width // 2, self.info.height // 2))
         rh, rw, _ = radar.shape
         rect = sv.Rect(
