@@ -56,7 +56,8 @@ pitch_x_m, pitch_y_m, pitch_valid, bbox_x1..bbox_y2`.
   origin top-left, metres. `pitch_valid=false` when a frame had too few pitch
   keypoints for a homography (zoom-ins, replays) — those rows still carry image
   pixels.
-- **`object_id`**: ByteTrack id (stable within a clip; `"ball"` for the ball).
+- **`object_id`**: ByteTrack id (stable within a clip); nullable integer. The
+  ball has no track, so its `object_id` is null (`<NA>`) — identify it by `role`.
 - **`team`**: `0`/`1` are **arbitrary KMeans clusters, not stable across clips**
   and not tied to home/away. Map them to real teams downstream.
 
@@ -88,9 +89,9 @@ testing but slow (1280px YOLO + SigLIP). For real runs use a GPU:
 - **Reproducibility**: the image pins the Python stack and checks out
   `roboflow/sports` at `--build-arg SPORTS_REF` (default `main`; pass a commit
   SHA to freeze). If upstream changes its API you may need to bump pins.
-- Models cache to `./data` (checkpoints + `hf_cache` for SigLIP), so re-runs
-  don't re-download. Output files are written as root (container default); `sudo
-  chown` them if needed.
+- Assets cache under `./data` (checkpoints in `./data/models/`, SigLIP weights in
+  `./data/hf_cache/`), so re-runs don't re-download. Output files are written as
+  root (container default); `sudo chown` them if needed.
 
 ## Hand-off to Layer 2
 

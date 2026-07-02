@@ -152,7 +152,7 @@ def main() -> None:
     ap.add_argument("--source", required=True, help="input video path")
     ap.add_argument("--out-dir", default="/output", help="directory for outputs")
     ap.add_argument(
-        "--model-dir", default="/data", help="dir holding the .pt checkpoints"
+        "--model-dir", default="/data/models", help="dir holding the .pt checkpoints"
     )
     ap.add_argument("--device", default="cpu", help="cpu | cuda | mps")
     ap.add_argument(
@@ -367,7 +367,7 @@ def main() -> None:
             bdet = ball_slicer(frame).with_nms(threshold=0.1)
             bdet = ball_tracker.update(bdet)
             for i in range(len(bdet)):
-                emit("ball", None, "ball", bdet.xyxy[i])
+                emit("ball", None, None, bdet.xyxy[i])  # ball has no track id
 
         frames_jsonl.append(
             dict(
@@ -434,6 +434,10 @@ def main() -> None:
 
     # --- write outputs ---
     df = pd.DataFrame(rows)
+    if "object_id" in df.columns:
+        # Single-typed column so arrow/parquet can serialise it: tracker ids stay
+        # integers, the ball (which has no track) becomes <NA>.
+        df["object_id"] = df["object_id"].astype("Int64")
     pq = os.path.join(args.out_dir, "tracking.parquet")
     csv = os.path.join(args.out_dir, "tracking.csv")
     jsonl = os.path.join(args.out_dir, "frames.jsonl")
