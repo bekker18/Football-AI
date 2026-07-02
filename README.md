@@ -56,8 +56,9 @@ pitch_x_m, pitch_y_m, pitch_valid, bbox_x1..bbox_y2`.
   origin top-left, metres. `pitch_valid=false` when a frame had too few pitch
   keypoints for a homography (zoom-ins, replays) — those rows still carry image
   pixels.
-- **`object_id`**: ByteTrack id (stable within a clip); nullable integer. The
-  ball has no track, so its `object_id` is null (`<NA>`) — identify it by `role`.
+- **`object_id`**: integer id, stable within a clip. `>= 1` is a ByteTrack id
+  for a person; `0` is the ball (one reserved track); `-1` is a detection not yet
+  confirmed by the tracker. No nulls — select the ball with `object_id == 0`.
 - **`team`**: `0`/`1` are **arbitrary KMeans clusters, not stable across clips**
   and not tied to home/away. Map them to real teams downstream.
 
@@ -66,6 +67,20 @@ pitch_x_m, pitch_y_m, pitch_valid, bbox_x1..bbox_y2`.
 `--device cpu|cuda|mps` · `--imgsz 1280` (player model) · `--ball-imgsz 640` ·
 `--stride-fit 60` (crop sampling for the team classifier) · `--max-frames 0`
 (0 = whole video) · `--ball` · `--save-video PATH`.
+
+### Speed knobs
+
+Team colour (SigLIP + UMAP) is the per-frame bottleneck, so it's predicted on a
+stride and majority-voted, not recomputed every frame:
+
+- `--team-stride 10` — frames between team-colour predictions (labels carried
+  forward per track in between). Lower if short tracks come out with null `team`.
+- `--pitch-stride 1` — frames between homography recomputes (reused in between).
+  Raise to ~3–5 to skip redundant pitch detection; higher gets staler on pans.
+- FP16 (`half`) inference is auto-enabled on `--device cuda`.
+
+On CPU, `--imgsz 960` and dropping `--ball` (the tiled slicer is many inferences
+per frame) are the biggest additional wins.
 
 ## GPU (optional)
 

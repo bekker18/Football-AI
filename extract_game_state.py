@@ -39,6 +39,12 @@ GOALKEEPER_CLASS_ID = 1
 PLAYER_CLASS_ID = 2
 REFEREE_CLASS_ID = 3
 
+# Reserved object_id for the ball. ByteTrack ids for people are >= 1 and
+# untracked people fall back to -1, so 0 collides with neither. Keeps the column
+# a clean integer (no nulls) and lets you select the ball's whole trajectory
+# with a single `object_id == 0`.
+BALL_OBJECT_ID = 0
+
 CONFIG = SoccerPitchConfiguration()
 PITCH_VERTICES = np.array(CONFIG.vertices)  # (N, 2) in cm
 PITCH_LEN_M = CONFIG.length / 100.0
@@ -188,9 +194,26 @@ def main() -> None:
         action="store_true",
         help="disable the per-track majority vote that stabilises team labels",
     )
+    ap.add_argument(
+        "--team-stride",
+        type=int,
+        default=10,
+        help="predict team colour every N frames (labels carried forward per "
+        "track in between; majority vote fills the rest). 1 = every frame.",
+    )
+    ap.add_argument(
+        "--pitch-stride",
+        type=int,
+        default=1,
+        help="recompute the homography every N frames, reusing it in between "
+        "(raise to skip redundant pitch detection; higher = staler on pans).",
+    )
     args = ap.parse_args()
 
     jersey = not args.full_crop
+    use_half = args.device == "cuda"  # FP16 inference on GPU (~1.5-2x)
+    args.team_stride = max(1, args.team_stride)  # avoid modulo-by-zero
+    args.pitch_stride = max(1, args.pitch_stride)
     os.makedirs(args.out_dir, exist_ok=True)
     player_pt = os.path.join(args.model_dir, "football-player-detection.pt")
     pitch_pt = os.path.join(args.model_dir, "football-pitch-detection.pt")
@@ -218,7 +241,7 @@ def main() -> None:
     for frame in tqdm(
         sv.get_video_frames_generator(args.source, stride=args.stride_fit), desc="crops"
     ):
-        res = player_model(frame, imgsz=args.imgsz, verbose=False)[0]
+        res = player_model(frame, imgsz=args.imgsz, verbose=False, half=use_half)[0]
         det = sv.Detections.from_ultralytics(res)
         crops += get_team_crops(frame, det[det.class_id == PLAYER_CLASS_ID], jersey)
     if len(crops) < 8:
@@ -239,7 +262,8 @@ def main() -> None:
         ball_tracker = BallTracker(buffer_size=20)
 
         def _ball_cb(image_slice: np.ndarray) -> sv.Detections:
-            r = ball_model(image_slice, imgsz=args.ball_imgsz, verbose=False)[0]
+            r = ball_model(image_slice, imgsz=args.ball_imgsz, verbose=False,
+                           half=use_half)[0]
             return sv.Detections.from_ultralytics(r)
 
         import inspect
@@ -289,6 +313,9 @@ def main() -> None:
     rows: List[dict] = []
     frames_jsonl: List[dict] = []
 
+    transformer = None  # reused between pitch-detection frames
+    team_cache: dict = {}  # track_id -> last predicted team, carried forward
+
     gen = sv.get_video_frames_generator(args.source)
     bar = tqdm(total=(total or None), desc="frames")
     for fidx, frame in enumerate(gen):
@@ -296,10 +323,15 @@ def main() -> None:
             break
         time_s = fidx / fps
 
-        transformer = build_transformer(pitch_model(frame, verbose=False)[0])
+        # Homography changes slowly relative to fps: recompute on a stride and
+        # reuse in between (also retry whenever we don't yet have a valid one).
+        if fidx % args.pitch_stride == 0 or transformer is None:
+            transformer = build_transformer(
+                pitch_model(frame, verbose=False, half=use_half)[0]
+            )
 
         det = sv.Detections.from_ultralytics(
-            player_model(frame, imgsz=args.imgsz, verbose=False)[0]
+            player_model(frame, imgsz=args.imgsz, verbose=False, half=use_half)[0]
         )
         det = tracker.update_with_detections(det)
 
@@ -307,11 +339,28 @@ def main() -> None:
         goalkeepers = det[det.class_id == GOALKEEPER_CLASS_ID]
         referees = det[det.class_id == REFEREE_CLASS_ID]
 
-        players_team = (
-            team_classifier.predict(get_team_crops(frame, players, jersey))
-            if len(players)
-            else np.array([], dtype=int)
-        )
+        # Team colour is expensive (SigLIP + UMAP transform). We only need a few
+        # predictions per track because the labels are majority-voted at the end,
+        # so predict on a stride and carry the last label forward per track id.
+        if len(players):
+            tids = (
+                players.tracker_id
+                if players.tracker_id is not None
+                else np.full(len(players), -1, dtype=int)
+            )
+            if fidx % args.team_stride == 0:
+                players_team = team_classifier.predict(
+                    get_team_crops(frame, players, jersey)
+                )
+                for tid, t in zip(tids, players_team):
+                    if int(tid) >= 0:
+                        team_cache[int(tid)] = int(t)
+            else:
+                players_team = np.array(
+                    [team_cache.get(int(tid), -1) for tid in tids], dtype=int
+                )
+        else:
+            players_team = np.array([], dtype=int)
         gk_team = resolve_goalkeepers_team_id(players, players_team, goalkeepers)
 
         frame_objs = []
@@ -325,7 +374,9 @@ def main() -> None:
                 time_s=round(time_s, 4),
                 object_id=oid,
                 role=role,
-                team=(int(team) if team is not None else None),
+                # team < 0 is the "not yet predicted" sentinel -> null (the
+                # majority vote fills it later if the track was ever classified).
+                team=(int(team) if team is not None and int(team) >= 0 else None),
                 img_x=round(ix, 2),
                 img_y=round(iy, 2),
                 pitch_x_m=(round(px, 3) if ok else None),
@@ -367,7 +418,7 @@ def main() -> None:
             bdet = ball_slicer(frame).with_nms(threshold=0.1)
             bdet = ball_tracker.update(bdet)
             for i in range(len(bdet)):
-                emit("ball", None, None, bdet.xyxy[i])  # ball has no track id
+                emit("ball", None, BALL_OBJECT_ID, bdet.xyxy[i])
 
         frames_jsonl.append(
             dict(
@@ -462,7 +513,12 @@ def main() -> None:
             note="x=length 0..120, y=width 0..70; from SoccerPitchConfiguration",
         ),
         ball_enabled=args.ball,
-        team_assignment=dict(jersey_crop=jersey, majority_vote=not args.no_team_vote),
+        team_assignment=dict(
+            jersey_crop=jersey,
+            majority_vote=not args.no_team_vote,
+            team_stride=args.team_stride,
+        ),
+        perf=dict(half=use_half, pitch_stride=args.pitch_stride),
         team_label_note="team 0/1 are arbitrary KMeans clusters, NOT stable across clips",
         args=vars(args),
         package_versions=pkg_versions(),
