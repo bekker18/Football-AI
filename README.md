@@ -123,10 +123,18 @@ src/
   ball.py        optional tiled ball detector (BallDetector)
   annotate.py    optional annotated-video overlay (VideoAnnotator)
   outputs.py     writing parquet/csv/jsonl/meta + version capture
-  pipeline.py    run(args): the two-phase extraction orchestration
+  pipeline.py    run(args): the two-phase extraction orchestration (+ --prepare)
   cli.py         argument parser + entry point
+  prerequisites/ raw game state -> event-ready game state (see below)
+    stitch.py      track id stabilization (motion stitching)
+    direction.py   team attacking-direction resolution
+    rescale.py     source -> target pitch rescale
+    ball.py        ball outlier rejection + Savitzky-Golay smoothing
+    deadball.py    in-play / dead-ball heuristic proxy
+    pipeline.py    run_prerequisites(df, cfg): compose the five transforms
+    cli.py         argument parser + entry point (python -m src.prerequisites)
 main.py                 thin launcher -> src.cli:main (Kaggle-friendly)
-tests/                  unit tests for the pure logic (teams, geometry)
+tests/                  unit tests for the pure logic (teams, geometry, prereqs)
 ```
 
 Run it three equivalent ways:
@@ -144,9 +152,101 @@ pip install -e ".[dev]"
 pytest
 ```
 
-## Hand-off to Layer 2
+## Hand-off downstream
 
-`tracking.parquet` is the game state. The Layer 2 adapter reshapes it into
+`tracking.parquet` is the raw game state. A downstream adapter reshapes it into
 Metrica-style per-frame tracking (home/away wide format, normalised coords using
-the `pitch` dims in `meta.json`) to feed pitch control / EPV / OBSO. Per the
-plan, Door 2 (tracking-native) consumes positions directly and needs no ball.
+the `pitch` dims in `meta.json`) to feed pitch control / EPV / OBSO. Door 2
+(tracking-native) consumes positions directly and needs no ball. That adapter
+consumes the **prepared** game state described next.
+
+# Prerequisites (raw game state → event-ready game state)
+
+Before any event detection or valuation, the raw Layer 1 state needs cleaning.
+`src/prerequisites/` provides five **composable, non-destructive** transforms —
+the stage between extraction and event/valuation work. Each one only **adds
+columns** (or emits metadata) — originals are never overwritten — and each is
+independently importable, unit-tested, and CLI-runnable. It depends only on
+pandas / numpy / scipy (not the CV stack).
+
+```bash
+# whole pipeline (reads meta.json for fps / pitch dims / stride — nothing hardcoded)
+python -m src.prerequisites run_prerequisites --in data/gamestate --out data/gamestate
+
+# any single transform standalone (same flags)
+python -m src.prerequisites smooth_ball --in data/gamestate --out /tmp/out
+```
+
+Or fold it into extraction so Layer 1 emits event-ready data in one command
+(raw outputs are still written too — the prepared files sit alongside them):
+
+```bash
+docker compose run --rm extract --source /data/raw/mygame.mp4 --prepare
+```
+
+`--prepare` uses default thresholds; run the standalone command above to tune
+them without re-running the (slow, GPU) video extraction.
+
+Pipeline order: `stitch_ids → resolve_direction → smooth_ball → synth_dead_ball
+→ rescale_coords` (rescale is independent; it runs last so synthetic ball rows
+are rescaled too).
+
+## Outputs (in the `--out` dir)
+
+| file | contents |
+|------|----------|
+| `tracking_prepared.parquet` | every original row + column, plus all added columns |
+| `frames_prepared.jsonl` | per-frame nested view (adds `in_play` / `in_play_conf`) |
+| `prep_meta.json` | all params used + resolved per-team directions + target pitch + stitching summary |
+
+### Added columns
+
+`stable_id`, `attack_dir`, `pitch_x_t_m`, `pitch_y_t_m`, `ball_outlier`,
+`ball_interp`, `synthetic`, `ball_x_s_m`, `ball_y_s_m`, `ball_vx_ms`,
+`ball_vy_ms`, `ball_speed_ms`, `ball_accel_ms2`, `in_play`, `in_play_conf`.
+
+## The five transforms (assumptions & key parameters)
+
+1. **Track id stabilization** (`stitch_ids`) — ByteTrack fragments a player into
+   several ids. With no appearance features, fragments are stitched by **motion
+   only**: link the end of track A to the start of track B when the gap ≤
+   `--stitch-max-gap-frames` (25), roles and (already voted) teams match, and A's
+   velocity-extrapolated position is within `--stitch-max-dist-m` (5.0) of B's
+   start. Adds `stable_id`; ball/referee/unlinked keep their id. *Cross-clip /
+   multi-half global re-ID is a documented TODO, not implemented.*
+
+2. **Team normalization + attacking direction** (`normalize_teams`) — resolves
+   each team's `attack_dir` (+1 → attacks toward `x_max`, −1 → toward `x=0`) per
+   period from **GK median pitch_x**. Fallbacks for sparse GK (`--min-gk-frames`,
+   5): mirror the other team; then deepest-defender centroid; else leave null and
+   warn (never guessed). `normalize_to_attack(x, attack_dir, length)` returns
+   attacking-normalized coordinates for one team without rotating the shared frame.
+
+3. **Coordinate rescale** (`rescale_coords`) — linear map from the source pitch
+   in `meta.json` (120×70) to a target convention (`--target-pitch 105x68`
+   default, `120x80` supported, or explicit `--target-length-m/--target-width-m`),
+   origin preserved. Adds `pitch_x_t_m` / `pitch_y_t_m`; recorded in `prep_meta`.
+
+4. **Ball smoothing + outlier rejection** (`smooth_ball`) — flags physically
+   impossible **isolated** points via a speed gate (`--ball-max-speed-ms`, 36) as
+   `ball_outlier` (never deleted); interpolates only short gaps
+   (`--ball-max-interp-gap`, 5 frames) with synthetic `ball_interp` rows;
+   Savitzky-Golay smooths each segment (`--ball-savgol-window` 7,
+   `--ball-savgol-order` 2) into `ball_x_s_m`/`ball_y_s_m`; velocity/speed/accel
+   are recomputed **from the smoothed track**. `pitch_stride` (from `meta.json`)
+   is honoured so homography-stride steps don't register as spikes.
+
+5. **Dead-ball / in-play flag** (`synth_dead_ball`) — a **tunable heuristic
+   proxy, not a ground-truth stoppage signal**. Per-frame `in_play` + confidence
+   from: ball out of bounds beyond `--oob-margin-m` (2.0) of the pitch extents, or
+   sustained near-zero speed (`--still-speed-ms` 0.5) near a boundary
+   (`--near-boundary-m` 3.0) for `--still-frames` (12). **Ball absence is treated
+   as occlusion, never as a dead ball** — the last decision is carried forward
+   with decaying confidence.
+
+Run the tests (pandas + scipy + pytest; the smoke test needs the sample
+`data/gamestate/tracking.parquet` and is skipped otherwise):
+
+```bash
+pytest tests/test_prereq_*.py
+```

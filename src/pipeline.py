@@ -160,10 +160,42 @@ def run(args) -> None:
         f"{paths['jsonl']}\n  {paths['meta']}{tail}"
     )
 
+    if getattr(args, "prepare", False):
+        _run_prerequisites(args.out_dir)
+
 
 # --------------------------------------------------------------------------- #
 # internals
 # --------------------------------------------------------------------------- #
+def _run_prerequisites(out_dir: str) -> None:
+    """Optional post-step: turn the just-written raw game state into event-ready
+    game state (see ``src/prerequisites``).
+
+    Reloads the artifacts we just wrote (so this runs the exact same pipeline as
+    the standalone ``python -m src.prerequisites`` CLI, with canonical dtypes)
+    and writes ``*_prepared.*`` alongside them. Imported lazily so a plain
+    extraction never pays for it.
+    """
+    from .prerequisites import (
+        config_from_meta,
+        load_gamestate,
+        run_prerequisites,
+        write_prepared,
+    )
+
+    print("[prepare] running prerequisites on the extracted game state ...")
+    df, meta = load_gamestate(out_dir)
+    cfg = config_from_meta(meta)
+    prepared, prep_meta = run_prerequisites(df, cfg)
+    prep_meta["source_meta"] = {
+        k: meta.get(k) for k in ("source", "fps", "pitch", "perf") if k in meta
+    }
+    paths = write_prepared(out_dir, prepared, prep_meta)
+    print(
+        f"[prepare] wrote:\n  {paths['parquet']}\n  {paths['jsonl']}\n  {paths['meta']}"
+    )
+
+
 def _resolve_checkpoints(args):
     """Locate the three .pt checkpoints; fail early if any required one is missing."""
     player_pt = os.path.join(args.model_dir, "football-player-detection.pt")

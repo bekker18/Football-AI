@@ -21,3 +21,6 @@ tqdm
 gdown==5.2.0
 pandas==2.2.3
 pyarrow==17.0.0
+
+# Prerequisites stage (Savitzky-Golay ball smoothing). numpy<2 compatible.
+scipy==1.13.1

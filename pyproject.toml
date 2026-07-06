@@ -17,9 +17,11 @@ dev = ["pytest"]
 
 [project.scripts]
 football-ai = "src.cli:main"
+football-ai-prep = "src.prerequisites.cli:main"
 
-[tool.setuptools]
-packages = ["src"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
 
 [tool.pytest.ini_options]
 # Let `pytest` import the package from the repo root without an install first.

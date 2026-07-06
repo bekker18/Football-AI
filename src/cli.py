@@ -37,6 +37,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="optional path to also write an annotated mp4 (headless)",
     )
     ap.add_argument(
+        "--prepare",
+        action="store_true",
+        help="after extraction, also run the prerequisites (stitch ids, attacking "
+        "direction, ball smoothing, dead-ball flag, rescale) and write "
+        "tracking_prepared.parquet / frames_prepared.jsonl / prep_meta.json "
+        "alongside the raw outputs. Uses default thresholds; run "
+        "`python -m src.prerequisites run_prerequisites` to tune them.",
+    )
+    ap.add_argument(
         "--full-crop",
         action="store_true",
         help="classify teams on the full player box instead of the jersey band",

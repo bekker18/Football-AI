@@ -1,0 +1,5 @@
+Considering this framework , I am thinking of doing everything in two approaches:
+
+1. Online. We will feed the online translation of the game, show mini-map with players, referee and ball; and show available to compute online metrics, e.g. possession, xG, xT, xA of the team and maybe some other metrics too.
+2. Offline. We feed the half time of the game, show mini-map with players, referee and ball; show metrics of the team, e.g. possession and so on.
+Right now framework does only 2nd approach and only with short clips. Is it possible in the 2nd approach feed the whole half-time or even a full match into this framework? Is it possible to make everything work in online mode?
