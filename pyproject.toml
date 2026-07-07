@@ -18,6 +18,9 @@ dev = ["pytest"]
 [project.scripts]
 football-ai = "src.cli:main"
 football-ai-prep = "src.prerequisites.cli:main"
+football-ai-eval = "src.eval.cli:main"
+football-ai-events = "src.events.cli:main"
+football-ai-twopass = "src.twopass.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

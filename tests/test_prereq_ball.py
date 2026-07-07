@@ -12,6 +12,7 @@ from src.prerequisites.config import (
     COL_BALL_OUTLIER,
     COL_BALL_SPEED,
     COL_BALL_XS,
+    COL_BALL_YS,
     COL_SYNTHETIC,
 )
 

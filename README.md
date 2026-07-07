@@ -9,6 +9,12 @@ The upstream repo only *renders annotated video*; this project adds a custom
 extractor that writes the actual data (parquet / csv / jsonl) plus an optional
 annotated video for eyeballing.
 
+> **Architecture & roadmap:** [`docs/strategy.md`](docs/strategy.md) records the
+> committed stance — *ball-free / tracking-native is the default for full-match
+> coverage; ball-based eventing is reserved for high-value windows* — the two
+> "doors", the two-pass controller, and the build order (benchmark → ball-free
+> eventing → two-pass gate).
+
 ## Quick start
 
 ```bash
@@ -265,3 +271,70 @@ Run the tests (pandas + scipy + pytest; the smoke test needs the sample
 ```bash
 pytest tests/test_prereq_*.py
 ```
+
+# Benchmark (Layer 1 quality vs. ground truth)
+
+`src/eval/` measures **how good the extraction actually is**, so eventing and
+valuation rest on numbers rather than eyeballed video. It compares predicted
+detections against ground truth **in pitch-metre space** and reports detection
+(precision/recall/F1 at a distance gate), localization (mean/RMSE metre error),
+identity (IDF1 — penalises id switches), and role/team accuracy. Depends only on
+pandas / numpy / scipy.
+
+```bash
+# our tracking vs. a SoccerNet Game State Reconstruction sequence
+python -m src.eval --pred data/gamestate --gt path/to/gsr_sequence --pitch 105x68
+
+# A/B two of our own runs against each other
+python -m src.eval --pred run_b/ --gt run_a/ --gt-format tracking
+```
+
+The metric engine is format-agnostic (consumes a canonical `frame, track_id, x,
+y, role, team` table); `src/eval/adapters.py` converts our output and SoccerNet-
+GSR labels onto it. Because our attacking direction is arbitrary, the evaluator
+searches pitch orientations (identity + 180°) and reports which it used. **Note:**
+the GSR coordinate assumptions (centimetres, pitch-centre origin) are documented
+in `adapters.py` and should be confirmed against a real GSR sample.
+
+# Ball-free eventing (high-value windows)
+
+`src/events/` is the first **Door 2 / tracking-native** surface (see
+[`docs/strategy.md`](docs/strategy.md)): a cheap pass over the whole match, using
+player positions only (no ball), that flags the frame ranges worth spending the
+expensive ball detector on. Per frame it measures, in each team's
+attacking-normalized frame, how heavily they've committed into the opponent's
+final third / box, scores it, and assembles contiguous high-value frames into
+padded, gap-merged **windows**. This window stream is exactly what the two-pass
+controller gates the ball detector on.
+
+```bash
+python -m src.events --in data/gamestate --out data/gamestate
+# -> high_value_windows.json (+ value_signals.parquet)
+```
+
+Consumes the *prepared* tracking (`tracking_prepared.parquet` — needs
+`attack_dir` + target-frame coords, so run `src.prerequisites` first). The
+emitted `meta.coverage_frac` is the key number: the share of the match a ball
+pass would touch instead of 100%. Depends only on pandas / numpy.
+
+# Two-pass controller (gate the ball detector onto flagged windows)
+
+`src/twopass/` is the mechanism that makes "ball only where it matters"
+automatic. It reads the high-value windows, **gates** them under a frame budget
+(highest-value first; an oversized top window is truncated around its core, never
+dropped), and — in the full pass — re-decodes only those frames to run the ball
+detector there, emitting a *sparse* ball table.
+
+```bash
+# gate only — no video / CV stack needed; shows how little of the match the ball runs on
+python -m src.twopass --in data/gamestate --plan-only --budget-frac 0.10
+
+# full pass 2 (needs the CV stack + checkpoints): detect the ball on the planned frames
+python -m src.twopass --in data/gamestate --source /data/raw/game.mp4 \
+    --model-dir data/models --budget-frac 0.10 --out data/gamestate
+```
+
+The gate/plan half (`plan.py`) is pure pandas/numpy and unit-tested; only the
+Pass 2 executor (`controller.py`) imports the Layer 1 CV stack. Output
+`ball_windows.parquet` feeds back into the prerequisites' ball smoothing for the
+covered windows. See [`docs/strategy.md`](docs/strategy.md) for the full rationale.
