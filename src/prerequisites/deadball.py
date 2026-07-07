@@ -126,11 +126,15 @@ def synth_dead_ball(df: pd.DataFrame, cfg: PrepConfig) -> Tuple[pd.DataFrame, di
         n_frames_ball_oob=n_oob,
         n_frames_ball_still=n_still,
         n_frames_ball_absent=n_absent,
+        n_frames_ball_present=len(bx),
         source=x_col,
         note=(
             "HEURISTIC PROXY, not a ground-truth stoppage signal. Tune "
             "oob_margin_m / still_speed_ms / still_frames / near_boundary_m per "
-            "footage. Ball absence is treated as occlusion, never as a dead ball."
+            "footage. Ball absence is treated as occlusion, never as a dead ball. "
+            f"Counters are derived from the emitted {x_col} column: "
+            "n_frames_ball_absent counts frames with no usable ball position "
+            "there (present + absent == n_frames)."
         ),
     )
     return df, meta

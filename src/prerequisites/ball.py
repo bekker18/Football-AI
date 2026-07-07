@@ -3,14 +3,20 @@
 The raw ball track is noisy: ~11% of consecutive-frame steps imply impossible
 speed (ID spikes / homography error). This transform, in order:
 
-1. flags physically impossible **isolated** points via a speed gate
-   (``ball_outlier``) — distinguishing single-frame spikes (rejected) from
-   sustained jumps (a genuine fast move / relocation, kept);
+1. **robustly** rejects every physically impossible point via an *iterative*
+   speed gate (``ball_outlier``): any point whose implied speed to its accepted
+   neighbours exceeds ``ball_max_speed_ms`` is removed and the gate re-evaluated,
+   until no consecutive-frame step in the retained track exceeds the cap. This
+   catches not just isolated single-frame spikes but also two-frame excursions
+   and step-changes — none of which a "sustained jump = keep" rule would flag;
 2. linearly interpolates only **short** gaps (<= ``ball_max_interp_gap``),
    emitting synthetic ball rows flagged ``ball_interp``; long gaps stay missing;
 3. Savitzky-Golay smooths each contiguous segment (order 2, window 7 @ 25 fps by
-   default) into ``ball_x_s_m`` / ``ball_y_s_m``;
-4. recomputes velocity / speed / acceleration **from the smoothed track**.
+   default) into ``ball_x_s_m`` / ``ball_y_s_m`` — applied only *after* the wild
+   points are gone (S-G is a least-squares fit and is NOT robust to outliers, so
+   any impossible point left in would smear into its neighbours);
+4. recomputes velocity / speed / acceleration **from the smoothed track**, and
+   asserts the smoothed track has ZERO consecutive-frame steps above the cap.
 
 If ``pitch_stride > 1`` (homography reused across frames), the known small steps
 at stride boundaries are excluded from spike detection so they don't register as
@@ -90,20 +96,29 @@ def _savgol_numpy(y: np.ndarray, window: int, order: int) -> np.ndarray:
     return out
 
 
-def _flag_outliers(frames, xs, ys, cfg) -> np.ndarray:
-    """Return a boolean mask of isolated impossible-speed ball points.
+def _reject_impossible(frames, xs, ys, cfg) -> np.ndarray:
+    """Return a boolean mask of impossible-speed ball points (iterative gate).
 
-    A point is an outlier when the speed to *both* its present neighbours exceeds
-    the gate but the direct neighbour-to-neighbour speed does not — i.e. removing
-    just this one point makes the trajectory plausible (a single-frame spike). A
-    sustained jump (consecutive far points) is left unflagged.
+    Robust rejection: repeatedly find every consecutive-frame step between the
+    currently-retained points that exceeds ``ball_max_speed_ms``, drop the single
+    retained point most implicated in those steps, and re-evaluate. Iterate until
+    no retained consecutive-frame step exceeds the cap. Unlike an "odd-one-out"
+    single-spike test, this also removes two-frame excursions and step-changes,
+    which is required so Savitzky-Golay (a non-robust least-squares smoother)
+    never sees a wild point.
+
+    Termination is guaranteed: each pass removes exactly one point, and once two
+    or fewer points remain no consecutive step can exceed the cap. When
+    ``pitch_stride > 1`` the known small steps at stride boundaries are excluded
+    from the gate so reused-homography steps don't read as spikes.
     """
     n = len(frames)
-    out = np.zeros(n, dtype=bool)
+    outlier = np.zeros(n, dtype=bool)
     if n < 2:
-        return out
+        return outlier
     fps = cfg.fps
     vmax = cfg.ball_max_speed_ms
+    boundary = (frames % cfg.pitch_stride == 0) if cfg.pitch_stride > 1 else None
 
     def speed(i, j):
         dt = (frames[j] - frames[i]) / fps
@@ -111,21 +126,29 @@ def _flag_outliers(frames, xs, ys, cfg) -> np.ndarray:
             return np.inf
         return float(np.hypot(xs[j] - xs[i], ys[j] - ys[i]) / dt)
 
-    for i in range(1, n - 1):
-        if speed(i - 1, i) > vmax and speed(i, i + 1) > vmax and speed(i - 1, i + 1) <= vmax:
-            out[i] = True
-    # endpoints: odd-one-out if the neighbouring step is plausible
-    if n >= 3:
-        if speed(0, 1) > vmax and speed(1, 2) <= vmax:
-            out[0] = True
-        if speed(n - 2, n - 1) > vmax and speed(n - 3, n - 2) <= vmax:
-            out[n - 1] = True
-
-    # stride-boundary awareness: don't let known homography steps read as spikes
-    if cfg.pitch_stride > 1:
-        boundary = (frames % cfg.pitch_stride) == 0
-        out &= ~boundary
-    return out
+    keep = np.ones(n, dtype=bool)
+    while True:
+        idx = np.where(keep)[0]
+        if len(idx) < 2:
+            break
+        # score each retained point by the total speed excess of the offending
+        # consecutive-retained steps it participates in; the worst offender goes.
+        score = np.zeros(n, dtype=float)
+        any_offending = False
+        for a, b in zip(idx[:-1], idx[1:]):
+            if boundary is not None and (boundary[a] or boundary[b]):
+                continue  # known homography step at a stride boundary
+            excess = speed(a, b) - vmax
+            if excess > 0:
+                any_offending = True
+                score[a] += excess
+                score[b] += excess
+        if not any_offending:
+            break
+        victim = int(np.argmax(score))
+        keep[victim] = False
+        outlier[victim] = True
+    return outlier
 
 
 def _segments(frames: np.ndarray):
@@ -178,7 +201,7 @@ def smooth_ball(df: pd.DataFrame, cfg: PrepConfig) -> Tuple[pd.DataFrame, dict]:
     xs = present["pitch_x_m"].to_numpy(dtype=float)
     ys = present["pitch_y_m"].to_numpy(dtype=float)
 
-    outlier_mask = _flag_outliers(frames, xs, ys, cfg)
+    outlier_mask = _reject_impossible(frames, xs, ys, cfg)
     outlier_frames = set(frames[outlier_mask].tolist())
 
     # clean = present minus rejected spikes; these anchor interpolation/smoothing
@@ -227,6 +250,12 @@ def smooth_ball(df: pd.DataFrame, cfg: PrepConfig) -> Tuple[pd.DataFrame, dict]:
         accel = np.gradient(speed, dt) if len(seg_f) >= 2 else np.zeros_like(speed)
         for j, fr in enumerate(seg_f):
             results[int(fr)] = (sx[j], sy[j], vx[j], vy[j], speed[j], accel[j])
+
+    # invariant: the cleaned + smoothed track must contain no physically
+    # impossible consecutive-frame step. Rejection guarantees the retained/
+    # interpolated anchors already satisfy it and S-G only attenuates motion, so
+    # this must hold — assert it rather than silently emit a 294 m/s ball again.
+    _assert_no_impossible_steps(results, cfg)
 
     # write onto existing ball rows
     ball_idx = df.index[df["object_id"] == BALL_OBJECT_ID]
@@ -289,18 +318,51 @@ def smooth_ball(df: pd.DataFrame, cfg: PrepConfig) -> Tuple[pd.DataFrame, dict]:
         df[COL_BALL_INTERP] = df[COL_BALL_INTERP].astype("boolean")
         df[COL_SYNTHETIC] = df[COL_SYNTHETIC].astype(bool)
 
+    # counters are read back off the emitted columns so the manifest can never
+    # disagree with the data that was actually written (ball_interp is set on the
+    # synthetic rows added for interpolated frames; ball_outlier on every removed
+    # real row).
+    ball_rows = df[df["object_id"] == BALL_OBJECT_ID]
+    n_interp_emitted = int((ball_rows[COL_BALL_INTERP] == True).sum())  # noqa: E712
+    n_outliers_emitted = int((ball_rows[COL_BALL_OUTLIER] == True).sum())  # noqa: E712
+
     meta = dict(
         params=_ball_params(cfg),
         n_ball_frames=int(len(present)),
-        n_outliers=int(outlier_mask.sum()),
-        n_interpolated=int(len(interp_frames)),
+        n_outliers=n_outliers_emitted,
+        n_interpolated=n_interp_emitted,
         n_synthetic_rows=len(new_rows),
         note=(
-            "ball_outlier flags isolated impossible-speed spikes; ball_x_s_m/"
-            "ball_y_s_m are the smoothed track; velocity/speed/accel derived from it."
+            "ball_outlier flags every impossible-speed point removed by the "
+            "iterative gate (single spikes AND multi-frame excursions); ball_x_s_m"
+            "/ball_y_s_m are the smoothed track; velocity/speed/accel derived from "
+            "it. counters are recomputed from the emitted columns."
         ),
     )
     return df, meta
+
+
+def _assert_no_impossible_steps(results: dict, cfg: PrepConfig) -> None:
+    """Guard the definition-of-done invariant on the final smoothed track.
+
+    Raises ``AssertionError`` if any consecutive-frame (frame gap == 1) step in
+    the smoothed ball positions implies a speed above ``ball_max_speed_ms``.
+    """
+    if len(results) < 2:
+        return
+    vmax = cfg.ball_max_speed_ms
+    fps = cfg.fps
+    frs = sorted(results)
+    for f0, f1 in zip(frs[:-1], frs[1:]):
+        if f1 - f0 != 1:
+            continue
+        x0, y0 = results[f0][0], results[f0][1]
+        x1, y1 = results[f1][0], results[f1][1]
+        step_speed = float(np.hypot(x1 - x0, y1 - y0) * fps)
+        assert step_speed <= vmax + 1e-6, (
+            f"smoothed ball step {step_speed:.1f} m/s at frame {f0}->{f1} exceeds "
+            f"cap {vmax} m/s"
+        )
 
 
 def _ball_params(cfg: PrepConfig) -> dict:

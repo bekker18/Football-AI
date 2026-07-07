@@ -202,8 +202,14 @@ are rescaled too).
 ### Added columns
 
 `stable_id`, `attack_dir`, `pitch_x_t_m`, `pitch_y_t_m`, `ball_outlier`,
-`ball_interp`, `synthetic`, `ball_x_s_m`, `ball_y_s_m`, `ball_vx_ms`,
-`ball_vy_ms`, `ball_speed_ms`, `ball_accel_ms2`, `in_play`, `in_play_conf`.
+`ball_interp`, `synthetic`, `ball_x_s_m`, `ball_y_s_m`, `ball_x_ts_m`,
+`ball_y_ts_m`, `ball_vx_ms`, `ball_vy_ms`, `ball_speed_ms`, `ball_accel_ms2`,
+`in_play`, `in_play_conf`.
+
+Coordinate frames: `pitch_x_m`/`pitch_y_m` and `ball_x_s_m`/`ball_y_s_m` are in
+the **source** pitch frame (120×70); `pitch_x_t_m`/`pitch_y_t_m` and the smoothed
+ball `ball_x_ts_m`/`ball_y_ts_m` are in the **target** frame (105×68). `prep_meta`
+records this under `rescale_coords.coordinate_frames`.
 
 ## The five transforms (assumptions & key parameters)
 
@@ -225,16 +231,24 @@ are rescaled too).
 3. **Coordinate rescale** (`rescale_coords`) — linear map from the source pitch
    in `meta.json` (120×70) to a target convention (`--target-pitch 105x68`
    default, `120x80` supported, or explicit `--target-length-m/--target-width-m`),
-   origin preserved. Adds `pitch_x_t_m` / `pitch_y_t_m`; recorded in `prep_meta`.
+   origin preserved. Adds `pitch_x_t_m` / `pitch_y_t_m`, and — when the smoothed
+   ball is present — `ball_x_ts_m` / `ball_y_ts_m` (smoothed ball in the target
+   frame, so downstream code never mixes frames); recorded in `prep_meta`.
 
-4. **Ball smoothing + outlier rejection** (`smooth_ball`) — flags physically
-   impossible **isolated** points via a speed gate (`--ball-max-speed-ms`, 36) as
-   `ball_outlier` (never deleted); interpolates only short gaps
-   (`--ball-max-interp-gap`, 5 frames) with synthetic `ball_interp` rows;
-   Savitzky-Golay smooths each segment (`--ball-savgol-window` 7,
-   `--ball-savgol-order` 2) into `ball_x_s_m`/`ball_y_s_m`; velocity/speed/accel
-   are recomputed **from the smoothed track**. `pitch_stride` (from `meta.json`)
-   is honoured so homography-stride steps don't register as spikes.
+4. **Ball smoothing + outlier rejection** (`smooth_ball`) — **robustly** rejects
+   every physically impossible point via an *iterative* speed gate
+   (`--ball-max-speed-ms`, 36) as `ball_outlier` (never deleted): a point whose
+   implied speed to its accepted neighbours exceeds the cap is removed and the
+   gate re-run until no consecutive-frame step in the retained track exceeds it —
+   catching two-frame excursions and step-changes, not only isolated spikes.
+   Short gaps (`--ball-max-interp-gap`, 5 frames) are then interpolated with
+   synthetic `ball_interp` rows, and *only then* Savitzky-Golay smooths each
+   segment (`--ball-savgol-window` 7, `--ball-savgol-order` 2) into
+   `ball_x_s_m`/`ball_y_s_m` (rejecting outliers first because S-G is a
+   least-squares fit and is not robust to them); velocity/speed/accel are
+   recomputed **from the smoothed track**, which is asserted to contain zero
+   consecutive-frame steps above the cap. `pitch_stride` (from `meta.json`) is
+   honoured so homography-stride steps don't register as spikes.
 
 5. **Dead-ball / in-play flag** (`synth_dead_ball`) — a **tunable heuristic
    proxy, not a ground-truth stoppage signal**. Per-frame `in_play` + confidence

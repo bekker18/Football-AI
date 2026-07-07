@@ -34,6 +34,36 @@ def test_flags_isolated_spike_only():
     assert abs(ball.set_index("frame")[COL_BALL_XS][5] - 5.0) < 3.0
 
 
+def test_no_impossible_steps_after_smoothing():
+    # gentle base motion (~5 m/s) with an injected single-frame spike and a
+    # two-frame excursion. Both must be rejected BEFORE Savitzky-Golay so the
+    # final smoothed track has ZERO consecutive-frame steps above the cap.
+    frames = list(range(40))
+    xs = [0.2 * f for f in frames]  # 0.2 m/frame = 5 m/s @ 25 fps
+    xs[10] = 500.0  # single-frame spike
+    xs[20] = 400.0  # two-frame excursion ...
+    xs[21] = 402.0  # ... two consecutive impossible frames
+    cfg = PrepConfig()
+    out, meta = smooth_ball(_ball_line(frames, xs), cfg)
+
+    ball = (
+        out[out["object_id"] == BALL_OBJECT_ID]
+        .dropna(subset=[COL_BALL_XS])
+        .sort_values("frame")
+    )
+    f = ball["frame"].to_numpy(dtype=float)
+    sx = ball[COL_BALL_XS].to_numpy(dtype=float)
+    sy = ball[COL_BALL_YS].to_numpy(dtype=float)
+    consecutive = np.diff(f) == 1
+    step_speed = np.hypot(np.diff(sx), np.diff(sy)) * cfg.fps
+    assert (step_speed[consecutive] <= cfg.ball_max_speed_ms + 1e-6).all()
+
+    # every impossible point is flagged (not just the isolated single-frame one)
+    flags = ball.set_index("frame")[COL_BALL_OUTLIER]
+    assert bool(flags[10]) and bool(flags[20]) and bool(flags[21])
+    assert meta["n_outliers"] >= 3
+
+
 def test_interpolates_short_gap_with_synthetic_rows():
     out, meta = smooth_ball(_ball_line([0, 1, 2, 5, 6], [0, 1, 2, 5, 6]), PrepConfig())
     assert meta["n_synthetic_rows"] == 2  # frames 3 and 4 filled

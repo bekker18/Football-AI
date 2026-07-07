@@ -1,7 +1,7 @@
 """Dead-ball / in-play proxy flag."""
 
 from prereq_helpers import make_df, row
-from src.prerequisites import PrepConfig, synth_dead_ball
+from src.prerequisites import PrepConfig, smooth_ball, synth_dead_ball
 from src.prerequisites.config import BALL_OBJECT_ID, COL_IN_PLAY, COL_IN_PLAY_CONF
 
 
@@ -13,6 +13,24 @@ def test_out_of_bounds_reads_as_not_in_play():
     assert bool(per_frame[0]) is True
     assert bool(per_frame[9]) is False
     assert meta["n_frames_ball_oob"] == 5
+
+
+def test_still_ball_near_boundary_reads_as_dead():
+    # A stoppage the proxy must catch via the still-near-boundary path (which was
+    # never exercised on the sample clip): ball parked ~1.5 m from a touchline and
+    # effectively stationary for longer than still_frames. smooth_ball runs first
+    # so ball_speed_ms (~0) is available to the still test.
+    frames = list(range(25))  # > still_frames (12) of sustained stillness
+    df = make_df([row(f, BALL_OBJECT_ID, "ball", None, 1.5, 35.0) for f in frames])
+    cfg = PrepConfig()
+    smoothed, _ = smooth_ball(df, cfg)
+    out, meta = synth_dead_ball(smoothed, cfg)
+
+    per_frame = out.drop_duplicates("frame").set_index("frame")[COL_IN_PLAY]
+    assert bool(per_frame[0]) is True  # run not yet long enough -> still in play
+    assert bool(per_frame[24]) is False  # sustained stillness near a line -> dead
+    assert meta["n_frames_ball_still"] > 0
+    assert meta["n_dead"] > 0
 
 
 def test_ball_absence_is_not_a_dead_ball():
