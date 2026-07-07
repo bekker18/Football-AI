@@ -245,10 +245,11 @@ records this under `rescale_coords.coordinate_frames`.
    synthetic `ball_interp` rows, and *only then* Savitzky-Golay smooths each
    segment (`--ball-savgol-window` 7, `--ball-savgol-order` 2) into
    `ball_x_s_m`/`ball_y_s_m` (rejecting outliers first because S-G is a
-   least-squares fit and is not robust to them); velocity/speed/accel are
-   recomputed **from the smoothed track**, which is asserted to contain zero
-   consecutive-frame steps above the cap. `pitch_stride` (from `meta.json`) is
-   honoured so homography-stride steps don't register as spikes.
+   least-squares fit and is not robust to them), and a final rate limiter clamps
+   any residual S-G overshoot of a near-cap move back to the cap; velocity/speed/
+   accel are recomputed **from the smoothed track**, which is asserted to contain
+   zero consecutive-frame steps above the cap. `pitch_stride` (from `meta.json`)
+   is honoured so homography-stride steps don't register as spikes.
 
 5. **Dead-ball / in-play flag** (`synth_dead_ball`) — a **tunable heuristic
    proxy, not a ground-truth stoppage signal**. Per-frame `in_play` + confidence

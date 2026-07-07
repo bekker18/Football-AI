@@ -5,6 +5,7 @@ import pytest
 
 from prereq_helpers import make_df, row
 from src.prerequisites import PrepConfig, savgol_smooth, smooth_ball
+from src.prerequisites.ball import _limit_speed
 from src.prerequisites.config import (
     BALL_OBJECT_ID,
     COL_BALL_INTERP,
@@ -62,6 +63,21 @@ def test_no_impossible_steps_after_smoothing():
     flags = ball.set_index("frame")[COL_BALL_OUTLIER]
     assert bool(flags[10]) and bool(flags[20]) and bool(flags[21])
     assert meta["n_outliers"] >= 3
+
+
+def test_limit_speed_clamps_overshoot_and_preserves_downstream_shape():
+    # Savitzky-Golay can overshoot a near-cap move into an over-cap step; the rate
+    # limiter must clamp that step to the cap while leaving downstream steps intact.
+    dt = 1.0 / 25.0
+    vmax = 36.0
+    over = 39.0 * dt  # a single 39 m/s step (> cap)
+    sx = np.array([0.0, 0.0, over, over + 0.1, over + 0.2])  # jump, then gentle drift
+    sy = np.zeros_like(sx)
+    lx, ly = _limit_speed(sx, sy, vmax, dt)
+    steps = np.hypot(np.diff(lx), np.diff(ly)) / dt
+    assert (steps <= vmax + 1e-6).all()
+    assert np.isclose(steps[1], vmax)  # the offending step lands exactly at the cap
+    assert np.isclose(lx[3] - lx[2], 0.1)  # downstream relative motion unchanged
 
 
 def test_interpolates_short_gap_with_synthetic_rows():

@@ -14,7 +14,8 @@ speed (ID spikes / homography error). This transform, in order:
 3. Savitzky-Golay smooths each contiguous segment (order 2, window 7 @ 25 fps by
    default) into ``ball_x_s_m`` / ``ball_y_s_m`` — applied only *after* the wild
    points are gone (S-G is a least-squares fit and is NOT robust to outliers, so
-   any impossible point left in would smear into its neighbours);
+   any impossible point left in would smear into its neighbours) — then a rate
+   limiter clamps any residual S-G overshoot of a near-cap move back to the cap;
 4. recomputes velocity / speed / acceleration **from the smoothed track**, and
    asserts the smoothed track has ZERO consecutive-frame steps above the cap.
 
@@ -163,6 +164,33 @@ def _segments(frames: np.ndarray):
     yield start, len(frames)
 
 
+def _limit_speed(sx: np.ndarray, sy: np.ndarray, vmax: float, dt: float):
+    """Clamp consecutive-frame displacements to ``<= vmax*dt`` on a contiguous track.
+
+    A forward rate-limiter. Savitzky-Golay is a least-squares fit and can slightly
+    *overshoot* a legitimate near-cap move (e.g. smooth a real ~36 m/s kick into a
+    39 m/s step), so the cleaned track being under the cap does not by itself
+    guarantee the smoothed track is. Where a smoothed step exceeds the cap, pull
+    that point — and the rest of the segment with it — back along the step so it
+    lands exactly at the cap. Shifting a whole suffix by a constant vector leaves
+    every downstream step's magnitude unchanged, so a single pass makes every step
+    ``<= vmax`` while keeping the trajectory continuous. Assumes adjacent array
+    indices are consecutive frames (true within a :func:`_segments` run).
+    """
+    sx = np.asarray(sx, dtype=float).copy()
+    sy = np.asarray(sy, dtype=float).copy()
+    max_step = vmax * dt
+    for i in range(1, len(sx)):
+        dx = sx[i] - sx[i - 1]
+        dy = sy[i] - sy[i - 1]
+        dist = float(np.hypot(dx, dy))
+        if dist > max_step:
+            scale = max_step / dist
+            sx[i:] -= dx * (1.0 - scale)
+            sy[i:] -= dy * (1.0 - scale)
+    return sx, sy
+
+
 def _ensure_ball_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Add the ball/smoothing columns with NA defaults if not already present."""
     if COL_BALL_OUTLIER not in df.columns:
@@ -240,6 +268,9 @@ def smooth_ball(df: pd.DataFrame, cfg: PrepConfig) -> Tuple[pd.DataFrame, dict]:
         seg_f = known_f[a:b]
         sx = savgol_smooth(known_x[a:b], cfg.ball_savgol_window, cfg.ball_savgol_order)
         sy = savgol_smooth(known_y[a:b], cfg.ball_savgol_window, cfg.ball_savgol_order)
+        # S-G can overshoot a near-cap move; the limiter enforces the speed cap on
+        # the final smoothed track so the invariant below holds by construction.
+        sx, sy = _limit_speed(sx, sy, cfg.ball_max_speed_ms, dt)
         if len(seg_f) >= 2:
             vx = np.gradient(sx, dt)
             vy = np.gradient(sy, dt)
@@ -251,10 +282,10 @@ def smooth_ball(df: pd.DataFrame, cfg: PrepConfig) -> Tuple[pd.DataFrame, dict]:
         for j, fr in enumerate(seg_f):
             results[int(fr)] = (sx[j], sy[j], vx[j], vy[j], speed[j], accel[j])
 
-    # invariant: the cleaned + smoothed track must contain no physically
-    # impossible consecutive-frame step. Rejection guarantees the retained/
-    # interpolated anchors already satisfy it and S-G only attenuates motion, so
-    # this must hold — assert it rather than silently emit a 294 m/s ball again.
+    # invariant (DoD): the final smoothed track has no physically impossible
+    # consecutive-frame step. Robust rejection removes wild points before S-G and
+    # the post-S-G limiter clamps any overshoot, so this holds by construction —
+    # the assertion is a cheap post-condition guarding against regressions.
     _assert_no_impossible_steps(results, cfg)
 
     # write onto existing ball rows
