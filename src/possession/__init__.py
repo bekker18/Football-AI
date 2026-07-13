@@ -28,13 +28,23 @@ from .config import PossessionConfig, config_from_prep_meta
 from .pipeline import detect_possession, summarize
 from .segments import possession_segments
 from .sweep import format_sweep, radius_grid, sweep_radii
-from .zone import ball_positions, candidates, possession_frames
+from .zone import (
+    ball_positions,
+    ball_to_player_distances,
+    candidates,
+    possession_frames,
+)
+
+# NOTE: `review` (the video overlay) is deliberately NOT imported here -- it is
+# the only part that needs cv2, and importing this package must stay cheap and
+# dependency-light. Import it directly: `from src.possession.review import ...`.
 
 __all__ = [
     "PossessionConfig",
     "config_from_prep_meta",
     "possession_frames",
     "ball_positions",
+    "ball_to_player_distances",
     "candidates",
     "possession_segments",
     "detect_possession",

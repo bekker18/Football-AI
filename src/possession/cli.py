@@ -11,10 +11,15 @@ out, thresholds overridable.
     python -m src.possession sweep_radii --in data/gamestate --out /tmp/out \
         --r-min 1.0 --r-max 5.0 --r-step 0.5
 
+    # eyeball check: render the possessor onto the clip
+    python -m src.possession review_possession --in data/gamestate --out data/gamestate \
+        --video data/raw/2e57b9_0.mp4
+
 Reads the prepared tracking (``tracking_prepared.parquet`` + ``prep_meta.json``);
 writes ``possession_frames.parquet``, ``possession_segments.parquet`` and
-``possession_meta.json`` (or ``possession_sweep.csv`` in sweep mode). The
-prerequisite stage's own outputs are never touched.
+``possession_meta.json`` (or ``possession_sweep.csv`` in sweep mode, or
+``possession_review.mp4`` in review mode). The prerequisite stage's own outputs
+are never touched. Only ``review_possession`` needs ``cv2``.
 """
 
 from __future__ import annotations
@@ -59,6 +64,18 @@ def build_parser() -> argparse.ArgumentParser:
                        help="largest radius in the sweep (default 5.0)")
     sweep.add_argument("--r-step", type=float, default=0.5,
                        help="radius increment (default 0.5)")
+
+    review = sub.add_parser("review_possession",
+                            help="render the possession-review video (eyeball check)")
+    _add_common(review)
+    review.add_argument("--video", default=None,
+                        help="video to draw on (default: data/raw/<meta source>)")
+    review.add_argument("--video-out", default=None,
+                        help="output path (default: <out>/possession_review.mp4)")
+    review.add_argument("--start-frame", type=int, default=0,
+                        help="first frame to render (default 0)")
+    review.add_argument("--end-frame", type=int, default=None,
+                        help="last frame to render (default: all)")
     return ap
 
 
@@ -129,6 +146,35 @@ def _run_sweep(df, cfg, args) -> None:
     print(f"[possession] wrote:\n  {csv_path}")
 
 
+def _default_video(prep_meta: dict) -> str:
+    """Where Layer 1's source clip normally lives (from the recorded meta)."""
+    source = (prep_meta.get("source_meta", {}) or {}).get("source") or ""
+    return os.path.join("data", "raw", os.path.basename(source))
+
+
+def _run_review(df, cfg, prep_meta, args) -> None:
+    from .review import render_review
+
+    video_in = args.video or _default_video(prep_meta)
+    video_out = args.video_out or os.path.join(args.out_dir, "possession_review.mp4")
+
+    frames, _, meta = detect_possession(df, cfg)
+    info = render_review(
+        df, frames, cfg, video_in, video_out,
+        start_frame=args.start_frame, end_frame=args.end_frame,
+    )
+    print(
+        f"[possession] reviewed {info['n_frames_written']} frames at "
+        f"R_pz={cfg.r_pz_m:g} m  (clean {meta['clean_pct']:.1f}%  "
+        f"duel {meta['duel_pct']:.1f}%)"
+    )
+    print(
+        "[possession] white ring = possessor; orange ring = rival inside the "
+        "zone (a duel); minimap circle = R_pz to scale."
+    )
+    print(f"[possession] wrote:\n  {info['video_out']}")
+
+
 def main(argv=None) -> None:
     args = build_parser().parse_args(argv)
     df, prep_meta = _load_prepared(args.in_dir)
@@ -137,6 +183,8 @@ def main(argv=None) -> None:
 
     if args.command == "sweep_radii":
         _run_sweep(df, cfg, args)
+    elif args.command == "review_possession":
+        _run_review(df, cfg, prep_meta, args)
     else:
         _run_detect(df, cfg, args.out_dir)
 

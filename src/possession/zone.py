@@ -106,7 +106,7 @@ def candidates(df: pd.DataFrame) -> pd.DataFrame:
     return cand.dropna(subset=[COL_STABLE_ID, COL_PITCH_X_T, COL_PITCH_Y_T])[cols]
 
 
-def _ball_to_player_distances(
+def ball_to_player_distances(
     df: pd.DataFrame, cfg: PossessionConfig
 ) -> pd.DataFrame:
     """Every (frame, candidate) pair that has a ball, with its distance.
@@ -114,6 +114,10 @@ def _ball_to_player_distances(
     One vectorized ``np.hypot`` over the whole merged table -- no Python loop
     over players. Frames with no ball, or with no candidates, simply produce no
     rows here and are handled by the caller.
+
+    Public because the review overlay needs the same per-candidate distances (to
+    draw *everyone* inside the zone, not just the possessor) and must not
+    re-derive them independently.
     """
     cand = candidates(df)
     ball = ball_positions(df)
@@ -155,7 +159,7 @@ def possession_frames(df: pd.DataFrame, cfg: PossessionConfig) -> pd.DataFrame:
     all_frames = np.sort(df["frame"].unique())
     out = pd.DataFrame({"frame": all_frames})
 
-    pairs = _ball_to_player_distances(df, cfg)
+    pairs = ball_to_player_distances(df, cfg)
     has_ball = set(ball_positions(df)["frame"].tolist())
 
     if len(pairs):

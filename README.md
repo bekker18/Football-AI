@@ -143,6 +143,7 @@ src/
     zone.py        the four states + vectorized ball-to-player distances
     segments.py    collapse same-possessor runs into touches
     sweep.py       calibration mode: sweep R_pz, report coverage/clean/duel
+    review.py      possession-review video overlay (the only cv2 dependency)
     pipeline.py    detect_possession(df, cfg): frames -> segments -> summary
     cli.py         argument parser + entry point (python -m src.possession)
 main.py                 thin launcher -> src.cli:main (Kaggle-friendly)
@@ -375,6 +376,38 @@ number of segments and median hold length (frames)** per radius. Read it as:
 coverage rises with the radius (good) while clean attribution falls and duels
 accelerate (bad) — pick the largest radius whose duel rate is still acceptable on
 *your* footage.
+
+## Review mode (watch it — the numbers can't tell you it's the *right* player)
+
+Coverage / clean / duel tell you *how much* was attributed, never whether it was
+attributed to the **right player**. Only watching it can:
+
+```bash
+python -m src.possession review_possession --in data/gamestate --out data/gamestate \
+    --video data/raw/2e57b9_0.mp4          # -> possession_review.mp4
+# a slice, while you're iterating:
+python -m src.possession review_possession --in data/gamestate --out /tmp/out \
+    --video data/raw/2e57b9_0.mp4 --start-frame 600 --end-frame 750
+```
+
+Per frame it draws:
+
+- the **possessor ringed in white**, labelled with its `stable_id`;
+- every *other* candidate inside `R_pz` **ringed in orange** — so a `contested`
+  frame visibly *shows* the duel instead of just asserting one;
+- the ball, with a line to the possessor labelled with the measured `dist_m`;
+- a colour-coded **state banner** (green possession / orange contested / grey
+  loose / red no_ball);
+- a **minimap** in the target 105×68 frame — the only place `R_pz` can be drawn
+  honestly as a **circle**, because metres are linear there. In image space the
+  same zone is a perspective-warped ellipse we have no homography to compute
+  post-hoc, so we draw the distance line rather than fake a circle;
+- a **timeline strip** along the bottom, one column per frame coloured by state,
+  with a cursor — the clip's whole possession structure at a glance.
+
+This is the only part of the layer that needs `cv2` (imported lazily, so
+`import src.possession` stays dependency-light). Drawing on Layer 1's
+`annotated.mp4` also works, but the overlays stack — prefer the raw clip.
 
 ```bash
 pytest tests/test_possession*.py
