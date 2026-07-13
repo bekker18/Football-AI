@@ -139,6 +139,12 @@ src/
     deadball.py    in-play / dead-ball heuristic proxy
     pipeline.py    run_prerequisites(df, cfg): compose the five transforms
     cli.py         argument parser + entry point (python -m src.prerequisites)
+  possession/    Layer 2: per-frame ball possessor (see below)
+    zone.py        the four states + vectorized ball-to-player distances
+    segments.py    collapse same-possessor runs into touches
+    sweep.py       calibration mode: sweep R_pz, report coverage/clean/duel
+    pipeline.py    detect_possession(df, cfg): frames -> segments -> summary
+    cli.py         argument parser + entry point (python -m src.possession)
 main.py                 thin launcher -> src.cli:main (Kaggle-friendly)
 tests/                  unit tests for the pure logic (teams, geometry, prereqs)
 ```
@@ -270,6 +276,108 @@ Run the tests (pandas + scipy + pytest; the smoke test needs the sample
 
 ```bash
 pytest tests/test_prereq_*.py
+```
+
+# Possession zone (Layer 2 — who is on the ball?)
+
+`src/possession/` is the **first Layer 2 component**: it assigns a **per-frame
+ball possessor** from the prepared game state. It is the primitive the event
+taxonomy is built on — a pass, a turnover, a duel and a dribble are all
+statements about *how the possessor changes between frames*, so the possessor
+stream has to exist, and be trustworthy, before any of that can be defined.
+**No event logic lives here** — possessor assignment only.
+
+```bash
+python -m src.possession detect_possession --in data/gamestate --out data/gamestate
+# -> possession_frames.parquet + possession_segments.parquet + possession_meta.json
+```
+
+Non-destructive: it only reads the prerequisite stage's outputs and writes its
+own `possession_*` files alongside them. Depends only on pandas / numpy.
+
+## The four states
+
+Each frame lands in exactly one state, by counting how many **candidates**
+(players + goalkeepers; **referees are excluded**) are within `R_pz` of the ball:
+
+| state | meaning | possessor |
+|-------|---------|-----------|
+| `no_ball` | no usable smoothed ball position — **occlusion, not a stoppage** | never |
+| `loose` | ball present but **nobody** within `R_pz` — pass in flight / loose ball | never |
+| `possession` | **exactly one** candidate within `R_pz` | that player |
+| `contested` | **two or more** within `R_pz` | the **nearest**, and the frame is flagged |
+
+Two invariants the tests pin: a possessor is **never fabricated** on a `loose` or
+`no_ball` frame, and a duel is **never resolved by guessing** beyond "nearest" —
+`contested` is a flag for a later duel-resolution step, not a verdict. Possessor
+identity is `stable_id` (the stitched track id), never the raw `object_id`.
+
+`no_ball` is deliberately *not* a stoppage: ball absence is occlusion, exactly as
+the prerequisites' `in_play` flag treats it. Dead-ball reasoning stays there.
+
+## Coordinate-frame contract
+
+This layer reads the **target** frame (105×68 m) **only**:
+
+- players / goalkeepers → `pitch_x_t_m` / `pitch_y_t_m`
+- ball (smoothed **and** rescaled) → `ball_x_ts_m` / `ball_y_ts_m`
+
+The source-frame columns (`pitch_x_m` / `ball_x_s_m`) must **never** be mixed in:
+the source→target rescale is *anisotropic* (x×0.875, y×0.971 for 120×70 → 105×68),
+so a distance measured across the two frames is silently wrong.
+
+## Outputs (in the `--out` dir)
+
+| file | contents |
+|------|----------|
+| `possession_frames.parquet` | one row per frame: `frame, time_s, state, possessor_id, possessor_team, dist_m, n_in_zone` |
+| `possession_segments.parquet` | possession **segments** (touches): maximal runs of the same possessor — `possessor_id, team, start_frame, end_frame, n_frames, start_time_s, end_time_s, n_contested`. **This is what the next layer reads.** |
+| `possession_meta.json` | config + summary: coverage, clean %, duel %, team split, segment stats |
+
+`dist_m` is the distance to the *nearest* candidate and is reported on `loose`
+frames too (it says *how* loose); `possessor_id` is populated **only** on
+`possession` / `contested` frames. A segment is broken by a `loose` or `no_ball`
+frame — bridging a hold across a gap is a *hold heuristic*, which belongs to the
+event layer, not to the primitive.
+
+## The radius, and why 3.0 m is an upper bound
+
+**`--r_pz` (default 3.0 m)** is the one real knob. Measured on the sample clip
+`2e57b9_0`, the nearest player-to-ball distance is median **1.86 m** / p75 **3.93 m**,
+and the radius trades coverage against duels:
+
+| `R_pz` | coverage % | clean % | duel % |
+|--------|-----------|---------|--------|
+| 2.0 m | 51.5 | 99.7 | 0.3 |
+| **3.0 m** | **62.7** | **98.1** | **1.9** |
+| 4.0 m | 75.3 | 95.3 | 4.7 |
+| 5.0 m | 82.6 | 87.2 | 12.8 |
+
+Duels stay <2% up to 3.0 m and then accelerate, so **3.0 m** is the default.
+Coverage is measured against **ball-frames**, not all frames: the ceiling is ball
+*presence* (90.5% on this clip), not 100%.
+
+> ⚠️ **Caveat — 3.0 m is an upper bound.** The calibration clip is a single
+> open-play attacking phase with **no congested box and no set-pieces**. A corner
+> or a goalmouth scramble packs many more players inside any given radius, so the
+> duel rate at 3.0 m there will be nothing like ~2%. **Re-run the sweep on new
+> footage and lower the radius before freezing it.**
+
+## Sweep mode (re-validate the radius before freezing it)
+
+```bash
+python -m src.possession sweep_radii --in data/gamestate --out /tmp/out \
+    --r-min 1.0 --r-max 5.0 --r-step 0.5     # -> possession_sweep.csv (+ table on stdout)
+```
+
+Reruns the detector at each radius and reports **coverage %, clean %, duel %,
+number of segments and median hold length (frames)** per radius. Read it as:
+coverage rises with the radius (good) while clean attribution falls and duels
+accelerate (bad) — pick the largest radius whose duel rate is still acceptable on
+*your* footage.
+
+```bash
+pytest tests/test_possession*.py
 ```
 
 # Benchmark (Layer 1 quality vs. ground truth)
