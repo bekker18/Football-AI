@@ -25,6 +25,10 @@ BALL_OBJECT_ID = 0
 # annotate.VideoAnnotator). Kept here so the sentinel and the colour agree.
 UNKNOWN_COLOR_IDX = 3
 
+# Context used to score ball candidates (see ball_select). Expressed in SECONDS,
+# not frames, so 60 fps footage gets the same real context as 25 fps footage.
+BALL_WINDOW_SECONDS = 2.0
+
 PITCH = SoccerPitchConfiguration()
 PITCH_VERTICES = np.array(PITCH.vertices)  # (N, 2) in cm
 PITCH_LEN_M = PITCH.length / 100.0

@@ -33,6 +33,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="enable ball detection (slow on CPU; off by default)",
     )
     ap.add_argument(
+        "--ball-legacy-tracker",
+        action="store_true",
+        help="collapse ball candidates with sports' BallTracker instead of running "
+        "in-play ball selection. For A/B only — the legacy rule locks onto static "
+        "spare balls on the touchline.",
+    )
+    ap.add_argument(
+        "--ball-window",
+        type=int,
+        default=0,
+        help="frames of context used to score ball candidates. 0 = auto (~2 s at "
+        "the clip's own fps, which is what the scoring is tuned for; a fixed frame "
+        "count would mean 2 s at 25 fps but 0.85 s at 60 fps).",
+    )
+    ap.add_argument(
+        "--ball-window-mode",
+        default="centered",
+        choices=("centered", "trailing"),
+        help="centered = offline (looks both ways); trailing = causal, for the "
+        "real-time path",
+    )
+    ap.add_argument(
+        "--ball-min-score",
+        type=float,
+        default=0.20,
+        help="minimum candidate-track score to be the in-play ball; below it NO "
+        "ball is emitted for that window (null is a legitimate answer)",
+    )
+    ap.add_argument(
         "--save-video",
         default=None,
         help="optional path to also write an annotated mp4 (headless)",

@@ -51,7 +51,13 @@ def run(args) -> None:
     team_classifier = _fit_team_classifier(player_model, args, jersey, use_half)
 
     ball_detector = (
-        BallDetector(ball_pt, args.device, args.ball_imgsz, use_half)
+        BallDetector(
+            ball_pt,
+            args.device,
+            args.ball_imgsz,
+            use_half,
+            legacy=getattr(args, "ball_legacy_tracker", False),
+        )
         if args.ball
         else None
     )
@@ -62,6 +68,7 @@ def run(args) -> None:
     tracker = sv.ByteTrack(minimum_consecutive_frames=3)
     rows: List[dict] = []
     frames_jsonl: List[dict] = []
+    ball_cands: List = []  # every ball-class detection; resolved after the loop
     transformer = None  # reused between pitch-detection frames
     team_cache: dict = {}  # track_id -> last predicted team, carried forward
 
@@ -117,8 +124,16 @@ def run(args) -> None:
         bdet = None
         if ball_detector is not None:
             bdet = ball_detector.detect(frame)
+            # Every ball-class detection is kept as a *candidate*. Which one is the
+            # in-play ball is decided after the loop, by ball_select — it needs a
+            # window of motion to tell the game ball from a static spare ball, and
+            # that evidence does not exist yet on this frame. Candidates are held
+            # out of `rows` so tracking.parquet keeps its one-ball-per-frame
+            # contract (six downstream modules select on object_id == 0).
             for i in range(len(bdet)):
-                add("ball", None, config.BALL_OBJECT_ID, bdet.xyxy[i])
+                ball_cands.append(
+                    _build_candidate(fidx, bdet, i, transformer)
+                )
 
         frames_jsonl.append(
             dict(
@@ -148,8 +163,15 @@ def run(args) -> None:
             f"corrected {n_flips} frame labels"
         )
 
+    # --- resolve the single in-play ball out of the candidates ---
+    ball_debug, ball_meta = _select_ball(args, fps, ball_cands, rows, frames_jsonl)
+
     meta = _build_meta(args, info, fps, rows, frames_jsonl, jersey, use_half)
-    df, paths = write_outputs(args.out_dir, rows, frames_jsonl, meta)
+    if ball_meta:
+        meta["ball_selection"] = ball_meta
+    df, paths = write_outputs(
+        args.out_dir, rows, frames_jsonl, meta, ball_debug=ball_debug
+    )
 
     valid = df["pitch_valid"].mean() if len(df) else 0.0
     print(f"\n[done] {len(rows)} object rows across {len(frames_jsonl)} frames")
@@ -251,6 +273,167 @@ def _predict_teams(clf, frame, players, jersey, fidx, team_stride, team_cache):
                 team_cache[int(tid)] = int(t)
         return pred
     return np.array([team_cache.get(int(tid), -1) for tid in tids], dtype=int)
+
+
+def _build_candidate(fidx, bdet, i, transformer):
+    """One ball-class detection -> a ball_select.Candidate.
+
+    Anchored at the bbox CENTRE, not the bottom edge. For people the bottom edge
+    is the feet — where they actually touch the pitch — but a ball is a sphere in
+    flight, and projecting its bbox bottom through the homography places an
+    airborne ball metres from where it is. The centre is the honest anchor for
+    deciding *which* ball this is. (The emitted row still carries the pipeline's
+    usual bottom-centre anchor as well, so downstream geometry is unchanged.)
+    """
+    from .ball_select import Candidate
+
+    x1, y1, x2, y2 = (float(v) for v in bdet.xyxy[i])
+    cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    px, py, ok = to_pitch_m(transformer, cx, cy)
+    conf = (
+        float(bdet.confidence[i])
+        if getattr(bdet, "confidence", None) is not None
+        else float("nan")
+    )
+    return Candidate(
+        frame=fidx,
+        img_x=cx,
+        img_y=cy,
+        pitch_x=px,
+        pitch_y=py,
+        pitch_valid=ok,
+        conf=conf,
+        bbox=(x1, y1, x2, y2),
+    )
+
+
+def _select_ball(args, fps, ball_cands, rows, frames_jsonl):
+    """Resolve one in-play ball per frame and append it to ``rows``.
+
+    Returns ``(debug_records, meta)``. ``debug_records`` is every candidate with
+    its track id, its score and whether it won — the side output for inspecting
+    exactly what was rejected and why.
+    """
+    if not ball_cands:
+        return [], {}
+
+    from .ball_select import BallSelectConfig, select_in_play_ball
+
+    # The window is a duration, not a frame count: ~2 s of context is what
+    # separates a static spare ball from a game ball that happens to be moving
+    # slowly. Pinning it to frames would silently halve the context on 60 fps
+    # footage. Odd so it can be centred.
+    window = args.ball_window
+    if window <= 0:
+        window = max(5, int(round(config.BALL_WINDOW_SECONDS * fps)) | 1)
+
+    cfg = BallSelectConfig(
+        fps=fps,
+        mode=args.ball_window_mode,
+        window_frames=window,
+        window_hop=max(1, window // 5),
+        min_score=args.ball_min_score,
+        pitch_len_m=config.PITCH_LEN_M,
+        pitch_wid_m=config.PITCH_WID_M,
+    )
+    selections, tracks, scores = select_in_play_ball(ball_cands, cfg)
+
+    objs_by_frame = {rec["frame"]: rec["objects"] for rec in frames_jsonl}
+    n_sel = 0
+    for s in selections:
+        if s.cand is None:
+            continue  # no in-play ball this frame: null is the correct answer
+        c = s.cand
+        row = _build_row(
+            s.frame,
+            round(s.frame / fps, 4),
+            config.BALL_OBJECT_ID,
+            "ball",
+            None,
+            c.bbox,
+            None,  # pitch coords are overwritten below from the centre anchor
+        )
+        # Keep the centre-anchored position from selection, image AND pitch, so the
+        # row is internally consistent (img_x/img_y is the point that projects to
+        # pitch_x_m/pitch_y_m). _build_row's bottom-edge anchor is right for people
+        # — that is where their feet meet the pitch — but wrong for a ball, which
+        # spends much of the match off the ground.
+        row["img_x"] = round(c.img_x, 2)
+        row["img_y"] = round(c.img_y, 2)
+        row["pitch_x_m"] = round(c.pitch_x, 3) if c.pitch_valid else None
+        row["pitch_y_m"] = round(c.pitch_y, 3) if c.pitch_valid else None
+        row["pitch_valid"] = c.pitch_valid
+        row["ball_sel_score"] = round(float(s.score), 4)
+        row["ball_sel_margin"] = round(float(s.margin), 4)
+        row["ball_track_id"] = int(s.track_id)
+        rows.append(row)
+        if s.frame in objs_by_frame:
+            objs_by_frame[s.frame].append(row)
+        n_sel += 1
+
+    sel_key = {(s.track_id, s.frame) for s in selections if s.cand is not None}
+    debug = [
+        dict(
+            frame=c.frame,
+            ball_track_id=int(c.track_id),
+            conf=float(c.conf),
+            img_x=round(c.img_x, 2),
+            img_y=round(c.img_y, 2),
+            pitch_x_m=(round(c.pitch_x, 3) if c.pitch_valid else None),
+            pitch_y_m=(round(c.pitch_y, 3) if c.pitch_valid else None),
+            pitch_valid=bool(c.pitch_valid),
+            bbox_x1=round(c.bbox[0], 1),
+            bbox_y1=round(c.bbox[1], 1),
+            bbox_x2=round(c.bbox[2], 1),
+            bbox_y2=round(c.bbox[3], 1),
+            selected=bool((c.track_id, c.frame) in sel_key),
+            track_score=(
+                round(float(scores[c.track_id].score), 4)
+                if c.track_id in scores
+                else None
+            ),
+            track_motion=(
+                round(float(scores[c.track_id].motion), 4)
+                if c.track_id in scores
+                else None
+            ),
+            track_onpitch=(
+                round(float(scores[c.track_id].onpitch), 4)
+                if c.track_id in scores
+                else None
+            ),
+            track_gyration_m=(
+                round(float(scores[c.track_id].gyration_m), 3)
+                if c.track_id in scores
+                else None
+            ),
+        )
+        for c in ball_cands
+    ]
+
+    n_frames_with_cands = len({c.frame for c in ball_cands})
+    meta = dict(
+        method="multi-candidate track scoring (motion energy + on-pitch fraction)",
+        mode=cfg.mode,
+        window_frames=cfg.window_frames,
+        min_score=cfg.min_score,
+        n_candidates=len(ball_cands),
+        n_candidate_tracks=len(tracks),
+        n_frames_with_candidates=n_frames_with_cands,
+        n_frames_ball_selected=n_sel,
+        note=(
+            "one in-play ball per frame in tracking.parquet; every candidate "
+            "(selected or not) in ball_candidates.parquet. Frames where no track "
+            "cleared min_score, or where the winning track had no detection, emit "
+            "NO ball row — null is a legitimate answer and feeds the gap handling "
+            "in prerequisites.ball."
+        ),
+    )
+    print(
+        f"[ball] {len(ball_cands)} candidates -> {len(tracks)} tracks; "
+        f"in-play ball on {n_sel}/{n_frames_with_cands} candidate frames"
+    )
+    return debug, meta
 
 
 def _build_row(fidx, time_s, oid, role, team, xyxy, transformer) -> dict:
