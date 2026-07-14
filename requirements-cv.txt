@@ -1,0 +1,27 @@
+# Pixels. Layer 1 only (video -> game state).
+#
+# Layer 1 = Layer 2 + this file. Nothing here is installed into the Layer 2 image,
+# which is the entire reason Layer 2 is ~950 MB instead of ~3.7 GB and needs no GPU
+# and no checkpoints.
+
+# Everything except pixels (numpy / pandas / pyarrow / scipy / opencv, + tests).
+-r requirements.txt
+
+# Torch CPU wheels. For GPU, see README (swap to the cu121 index + torch build).
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.3.1
+torchvision==0.18.1
+
+# Pinned to versions known-compatible with roboflow/sports' soccer example.
+ultralytics==8.2.103
+supervision==0.25.1
+transformers==4.49.0
+umap-learn==0.5.6
+scikit-learn==1.5.2
+pillow
+sentencepiece
+protobuf
+tqdm
+
+# Asset download
+gdown==5.2.0

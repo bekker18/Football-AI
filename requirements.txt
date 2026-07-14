@@ -1,26 +1,45 @@
-# Torch CPU wheels. For GPU, see README (swap to the cu121 index + torch build).
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.3.1
-torchvision==0.18.1
+# Everything except pixels.
+#
+# This is the WHOLE dependency set for Layer 2 (prerequisites -> possession ->
+# actions) and for the test suite. Layer 1 needs all of it too, and then torch /
+# YOLO / SigLIP on top — those live in requirements-cv.txt, which starts by
+# including this file. So the two layers cannot drift apart on a shared pin: there
+# is exactly one place each is written down, and Layer 1 is a strict superset of
+# Layer 2.
+#
+# That superset relationship is also the Dockerfile: the `l1` image is built FROM
+# the `l2` image (see ./Dockerfile). Layer 2 is ~950 MB, needs no GPU and no
+# checkpoints, and runs the entire event pipeline in seconds — which is what lets
+# you re-tune a threshold and re-run eventing without touching the slow half.
 
-# Pinned to versions known-compatible with roboflow/sports' soccer example.
-# numpy<2 keeps the numba/umap/opencv ABI stack happy.
+# --- tabular core ---------------------------------------------------------- #
+# numpy<2 keeps Layer 1's numba / umap / opencv ABI stack happy, and Layer 2
+# inherits it for free. Layer 1 writes parquet with this pandas/pyarrow pair and
+# Layer 2 reads it back with the same one — a drifted pair is the kind of bug that
+# surfaces as a corrupt column three stages downstream, not as a build failure.
 numpy<2
-ultralytics==8.2.103
-supervision==0.25.1
-transformers==4.49.0
-umap-learn==0.5.6
-scikit-learn==1.5.2
-opencv-python-headless==4.10.0.84
-pillow
-sentencepiece
-protobuf
-tqdm
-
-# Asset download + tabular output
-gdown==5.2.0
 pandas==2.2.3
 pyarrow==17.0.0
 
-# Prerequisites stage (Savitzky-Golay ball smoothing). numpy<2 compatible.
+# Savitzky-Golay ball smoothing (prerequisites) + the eval stage's matching.
 scipy==1.13.1
+
+# Video IO. Headless: there is no display in a container, and headless needs no
+# libGL — which is why Layer 2 can render the `review_*` overlay videos without
+# dragging in the X stack. Both review modes import cv2 lazily, so the rest of
+# Layer 2 runs even where it is missing entirely.
+opencv-python-headless==4.10.0.84
+
+# --- tests ----------------------------------------------------------------- #
+pytest
+
+# socceraction pins our MIRRORED SPADL vocabulary against the real one and
+# validates the emitted table through SPADLSchema. src/actions deliberately does
+# NOT import it at runtime — mirroring the enums is what keeps the stage
+# pandas-only, and this test dependency is what stops the mirror rotting silently,
+# since a reordered enum would turn every type_id we emit into a different,
+# valid-looking action.
+socceraction>=1.5
+# multimethod>=2 breaks pandera's check backend, which socceraction.spadl imports
+# transitively.
+multimethod<2

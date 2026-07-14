@@ -39,6 +39,57 @@ Fast smoke test (cap frames, coarser fit sampling):
 docker compose run --rm extract --source /data/raw/mygame.mp4 --max-frames 300 --stride-fit 30
 ```
 
+### …then Layer 2 (once you have game state)
+
+```bash
+docker compose build l2               # once, ~1 min
+
+docker compose run --rm prep          # tracking.parquet   -> tracking_prepared.parquet
+docker compose run --rm possession    # tracking_prepared  -> possession_frames/segments
+docker compose run --rm actions       # possession_*       -> spadl_actions* + ball_aerial
+docker compose run --rm l2            # the test suite
+```
+
+They must run **in that order** — each reads the previous one's output — and each
+is non-destructive: it only ever writes its own files. Each defaults to
+`--in data/gamestate --out data/gamestate`; append flags after the service name to
+override:
+
+```bash
+docker compose run --rm possession --r_pz 2.5
+docker compose run --rm actions --out /tmp/out --min-gap-frames 3 --no-aerial
+docker compose run --rm actions review_actions --video data/raw/2e57b9_0.mp4
+```
+
+## The two images
+
+One `Dockerfile`, two targets — and **`l1` is built `FROM l2`**, because that is
+the actual relationship rather than a packaging trick:
+
+| target | size | what it is | needs |
+|---|---|---|---|
+| **`l2`** | ~1.1 GB | game state → SPADL actions (`prep` · `possession` · `actions`) | pandas / numpy / scipy. **No GPU, no checkpoints, no video.** |
+| **`l1`** *(default)* | ~4.0 GB | video → game state (`extract` · `download`) | …all of the above, **plus** torch / YOLO / SigLIP / `roboflow/sports` |
+
+Layer 1 has to look at pixels. Layer 2 never does — it only reads the tables Layer
+1 already wrote — so it runs the whole event pipeline in **seconds**, which is what
+lets you re-tune a threshold and re-run eventing without going near the slow half.
+The `src` package is bind-mounted into the `l2` image rather than copied, so a code
+edit is live with **no rebuild**.
+
+Two requirements files, mirroring the two targets, with **no pin written twice**:
+
+- **`requirements.txt`** — everything except pixels (numpy / pandas / pyarrow /
+  scipy / opencv-headless, plus the test deps). This *is* Layer 2.
+- **`requirements-cv.txt`** — `-r requirements.txt` **+** torch / YOLO / SigLIP.
+  This is Layer 1.
+
+Layer 1 writes parquet with the same pandas/pyarrow that Layer 2 reads it back
+with — a drifted pair is the kind of bug that surfaces as a corrupt column three
+stages downstream rather than as a build failure, so it is made structurally
+impossible rather than merely watched for. `pip` resolves both files in one pass in
+the `l1` stage, so a conflict fails the *build* rather than an import in production.
+
 Enable ball detection (off by default — slow on CPU, and Layer 2 / Door 2 is
 ball-free-friendly):
 
@@ -95,7 +146,7 @@ testing but slow (1280px YOLO + SigLIP). For real runs use a GPU:
 
 1. Install the **NVIDIA Container Toolkit** on the host (this is more than "just
    Docker").
-2. In `requirements.txt` swap the torch index/build to CUDA, e.g.
+2. In `requirements-cv.txt` swap the torch index/build to CUDA, e.g.
    `--extra-index-url https://download.pytorch.org/whl/cu121` with matching
    `torch`/`torchvision` cu121 wheels, then `docker compose build`.
 3. `docker compose run --rm extract-gpu --source /data/raw/mygame.mp4`.
@@ -146,6 +197,18 @@ src/
     review.py      possession-review video overlay (the only cv2 dependency)
     pipeline.py    detect_possession(df, cfg): frames -> segments -> summary
     cli.py         argument parser + entry point (python -m src.possession)
+  actions/       Layer 2: possession transitions -> SPADL actions (see below)
+    source.py      the swappable possession-source interface (NOT the zone detector)
+    geometry.py    ball/player tracks, gap path features, goal geometry
+                   (emitted start/end come from PLAYERS -- the homography only
+                    knows z=0, so a mid-flight ball's coords are fiction)
+    aerial.py      airborne-ball flag from the img_y arc (heuristic, NOT height)
+    transitions.py the transition rules: touches -> typed events
+    spadl.py       the SPADL vocabulary + table contract (mirrors socceraction)
+    emit.py        transitions -> SPADL rows + the provenance sidecar
+    review.py      actions-review video overlay (the only cv2 dependency)
+    pipeline.py    detect_actions(source, tracking, cfg): the one call
+    cli.py         argument parser + entry point (python -m src.actions)
 main.py                 thin launcher -> src.cli:main (Kaggle-friendly)
 tests/                  unit tests for the pure logic (teams, geometry, prereqs)
 ```
@@ -411,6 +474,366 @@ This is the only part of the layer that needs `cv2` (imported lazily, so
 
 ```bash
 pytest tests/test_possession*.py
+```
+
+# Event layer (Layer 2 — possession transitions → SPADL actions)
+
+`src/actions/` turns the possessor stream into a **stream of on-ball events**,
+serialized to **SPADL** so `socceraction` can compute xT / VAEP on it with no
+adapter in between.
+
+> Not to be confused with `src/events/`, which is the *ball-free high-value
+> window* emitter used to schedule the Layer 1 ball detector (see below). This is
+> the event **taxonomy**.
+
+```bash
+python -m src.actions detect_actions --in data/gamestate --out data/gamestate
+# -> spadl_actions.parquet + spadl_actions_provenance.parquet
+#  + ball_aerial.parquet + actions_meta.json
+```
+
+Non-destructive: it reads the possession and prerequisite stages' outputs and
+writes its own files alongside them. Depends only on pandas / numpy —
+`socceraction` is a **test** dependency (it pins our SPADL vocabulary and
+validates the output), never a runtime one.
+
+## The core idea: events are transitions, not segments
+
+A pass is not something that happens *to* a player; it is the statement that the
+ball **left A and arrived at B**. So the layer walks the *gaps between possession
+segments* and names each one. The segments themselves are not events.
+
+Two passes over the stream:
+
+**1. Coalesce segments into touches.** Consecutive segments with the *same*
+possessor separated by a short gap are **one touch**. At `R_pz = 3 m` the ball
+routinely drifts a hair outside the zone and back — and a player driving with the
+ball knocks it past the zone and runs onto it. Merging those first is what makes
+a spurious pass *un-emittable* rather than something to recognise and discard
+later.
+
+**2. Walk the gaps between touches:**
+
+| gap between touch A and touch B | emitted |
+|---|---|
+| **same team, different player** | `pass` / **success**, ending at B's reception point. `cross` if it *originates* from a wide, advanced area. |
+| **cross-team** | a **turnover**, both sides emitted per SPADL convention: the loser's failed action **and** the winner's defensive one (see below). |
+| **same player** | nothing — it was already coalesced into one touch in pass 1. |
+| **within a touch** | `dribble` / **success**, *iff* the ball actually moved. |
+
+**Carries are per touch, not per gap**: the carry is the ball's journey from
+where a player received it to where they released it. That is what SPADL means
+by `dribble`, and it is what keeps the chain **spatially continuous** — a pass
+ends where the next player's carry starts, and that carry ends where their pass
+starts. xT reads exactly those start→end deltas, so a chain full of teleports
+would produce numbers that look fine and mean nothing.
+
+A touch where the ball **sits still is the ball parked near a player, not a
+dribble**, and emits nothing. The evidence for a carry is *movement*, never
+duration.
+
+**Receptions are not actions.** A successful pass already implies its reception;
+SPADL models it as one row with `result=success` and the reception in
+`end_x`/`end_y`.
+
+### Turnovers emit both sides
+
+The discriminator is whether the ball was **in flight** across the gap — i.e.
+whether it actually travelled (`--flight-min-travel-m`, default 3.0 m). A tackle
+takes the ball off a player who *has* it, so the ball barely moves; an
+interception cuts out a ball that was already on its way somewhere.
+
+| | losing team | winning team |
+|---|---|---|
+| ball **in flight** | `pass` / **fail** | `interception` / **success** |
+| ball **settled** | `bad_touch` / **fail** | `tackle` / **success** |
+
+## The gap guards (and why they are the whole ballgame)
+
+`loose` is **~37% of the ball-frames** on the test clip. Most of it is real
+in-flight passing, but some is just the ball drifting past the zone radius — so a
+naive "every possessor change is an event" walk **invents passes**. Three guards
+stop that. All are configurable, because they are footage-dependent.
+
+| flag | default | what it stops |
+|---|---|---|
+| `--bridge-max-gap-frames` | `12` | Same-possessor segments this close become **one touch**. Absorbs the 1-frame zone blip *and* the knock-and-chase. |
+| `--bridge-max-ball-dist-m` | `10.0` | …but only if the ball stayed *with* the carrier. A ball that genuinely left and came back is not one touch. |
+| `--min-gap-frames` / `--min-ball-travel-m` | `2` / `1.5` | A possessor **change** is credible only if the ball went somewhere, **or** was loose long enough for a real transfer, **or** changed hands with no loose phase at all (a 0-frame gap = contact = a tackle, always credible). Anything else is the zone flickering between two players standing together. |
+| `--min-path-coherence` | `0.5` | `straight-line / polyline` distance of the ball through the gap. 1.0 is a laser-straight delivery; low is a ball wobbling or ricocheting. Below this the action is still emitted but flagged **low-confidence** — this is what separates *a pass* from *an aimless deflection*. **Not applied to gaps the ball flew across** — see [Ball height](#ball-height-the-z0-problem-and-the-two-things-we-do-about-it). |
+| `--max-gap-frames` | `100` | Beyond 4 s, too much of the transfer went unobserved to name a single event for it. |
+| `--min-carry-m` / `--max-carry-m` | `2.0` / `60.0` | Ball movement within a touch needed to call it a dribble — and above which it is a tracking gap, not Maradona. |
+
+Refusals are **counted and reported**, never swallowed: `actions_meta.json` breaks
+them down by reason (`spurious`, `static_hold`, `same_player_long_gap`,
+`gap_too_long`, `no_geometry`). A gap we declined to name is a gap where something
+happened that we could not see, and burying that would make the chain look more
+complete than it is.
+
+## Occlusion: emitted, never trusted
+
+`no_ball` frames (~71 on the test clip) are **occlusion, never a stoppage**. A
+transition spanning them is still emitted — *a transition unseen is not a
+transition that did not happen* — but it is tagged `occluded`, its confidence is
+reduced, and its endpoints fall back to the **possessor's own position**. That
+fallback's error is *bounded by the possession radius* (a possessor is within
+`R_pz` of the ball by definition), rather than being a guess.
+
+**Hook for a ball-free source:** if the ball is missing for a whole gap, the
+geometry degrades gracefully to player positions and the layer still emits a
+coherent (uniformly low-confidence) chain. A PathCRF-style possession model could
+bridge or override those gaps — see `GapPath.from_tracks` in `geometry.py`.
+
+## Ball height: the z=0 problem, and the two things we do about it
+
+**The homography maps the image to the GROUND plane (z=0).** Every pitch
+coordinate in this project is therefore the answer to *"where would this pixel be
+if the thing in it were lying on the grass"*. For a ball on the grass that is
+right. For a ball **in the air** it is wrong in a specific, systematic way: the
+back-projected point is **stretched away from the camera** along the viewing ray,
+by an amount that grows with the ball's height. There is **no height channel
+anywhere in the pipeline** to correct it with.
+
+So an aerial pass used to be recorded as a *flat, distorted ground track* — a ball
+that appears to accelerate away, curve, and decelerate back, none of which
+happened. And those fake coordinates were setting the `start_x/y` / `end_x/y` of
+the very actions xT and VAEP are computed from.
+
+You can see it happen on the sample clip. The ball is hoofed at ~frame 102 and
+lands at ~frame 166. Frames **104–122 and 150–165 are all `ball_outlier=True`** in
+`tracking_prepared.parquet` — the prerequisites' speed gate threw them out as
+*physically impossible*. And it was right to, given what it could see: their
+implied ground speed **is** impossible, **because the ball was in the air**. The
+outlier flag is a *symptom* of the height problem — which is exactly why it cannot
+be used to diagnose it.
+
+### 1. Emitted geometry is anchored on PLAYERS, never on the mid-flight ball
+
+| action | `start_x/y` | `end_x/y` |
+|---|---|---|
+| `pass` / `cross` | the **passer's** position on the last frame he controlled the ball | the **receiver's** position on the first frame he controlled it (the reception point) |
+| `interception` / `tackle` | the **winner's** position where he won it | same |
+| `pass`/`fail`, `bad_touch` | the **loser's** position where he lost it | the winner's |
+| `dribble` | the **carrier's** own position at the touch's first frame | …and at its last |
+
+A player standing over the ball **is on the ground** — the one plane the homography
+is actually valid for. His error is bounded by the possession radius (a possessor
+is within `R_pz` of the ball by definition); the airborne ball's error is bounded
+by nothing.
+
+**SPADL actions are `start → end`, not trajectories**, so this alone keeps every
+distorted mid-flight coordinate out of the event stream and out of xT/VAEP. It also
+makes the chain **exactly** continuous rather than approximately: a pass ends at the
+receiver's position on frame *f*, and the receiver's carry starts at his position on
+frame *f* — the same point, not a point 3 m away. (That is also what socceraction
+means by a `dribble`: the connector between the action before and the action after.)
+
+The ball path still decides **what the action was** — did the ball travel at all
+(tackle vs. interception), how straight, was it in the air. It just never again says
+*where* it happened. The provenance table reports both, separately:
+`action_travel_m` (player → player, the geometry we stand behind) and
+`ball_travel_m` (the evidence we judged the gap on).
+
+> ⚠️ One escape hatch remains: if a player has **no position at all** on his own
+> endpoint frame, the ball's is used instead. That is flagged `endpoint_from_ball`
+> and docked confidence — it is the only route by which a ball coordinate can still
+> reach an emitted action.
+
+### 2. `airborne` — a per-ball-frame flag (`src/actions/aerial.py`)
+
+We cannot recover the height. What we *can* do is **notice**, so everything
+downstream can refuse to trust the ground coordinates.
+
+The camera looks **down** at the pitch, so a ball going **up** moves **up the
+image** and `img_y` **decreases**. A ball that rises and falls therefore traces a
+**local MINIMUM in `img_y`** — an upward-opening parabola. That vertical arc
+survives even though the horizontal geometry is ruined, because it lives in **image
+space, upstream of the homography**. Per loose run (ball attributed to nobody):
+
+1. **Clean `img_y` robustly** — running median + MAD, in image space. One bad
+   detection (frame 136: `img_y=449` amid `~325`) must not be able to drag a
+   least-squares vertex.
+2. **Fit a quadratic.** Airborne when the curvature opens upward, the **vertex is
+   observed inside the run**, the fit is good (R²), and the arc is deep enough.
+3. **Corroborate** with elevated-but-smooth apparent ground speed and with the bbox
+   height varying coherently (the ball is further away near the apex, so its box is
+   smaller). The speed floor also **gates** — it is the main defence against a
+   camera pan being read as an arc.
+4. **Partial arcs** (ball already up on entry, or only the descent visible) emit
+   `airborne=true` with **LOW, capped confidence** rather than forcing a parabola
+   onto half an arc.
+
+> **`ball_outlier` is deliberately NOT used as the spike filter.** It would be
+> *circular*: it is a ground-speed gate, so it rejects airborne balls **because**
+> they are airborne. Cleaning `img_y` with it would throw away two thirds of the
+> sample clip's arc and keep only its middle.
+
+**This is a heuristic, single-camera detector — not height recovery.** It answers
+"was the ball probably off the ground here?" with a confidence, and nothing more.
+Camera pan/tilt also moves `img_y`, which is why airborne additionally requires the
+ball to be **loose**, the run to be **bounded**, and the speed/bbox evidence to
+agree. Said out loud in `actions_meta.json` too.
+
+**Output** — `ball_aerial.parquet`: `frame`, `airborne` (bool), `aerial_conf`
+(0–1), one row per ball frame. A **sidecar**, joinable on `frame`, so the
+prerequisite and possession stages' outputs stay byte-for-byte what they were.
+
+**Consumption** — SPADL has no aerial action type, so an aerial pass is
+**subtyped, not retyped**: it stays a `pass` (or a `cross` if it meets the existing
+cross geometry) and its flight is recorded as `aerial` / `aerial_conf` in the
+**provenance table**. `actions_meta.json` counts the aerial passes/crosses and
+records every threshold used.
+
+### …and the coherence guard is relaxed for them
+
+`min_path_coherence` is a **straightness** test, and straightness is a property of
+the ball's **ground** path. An airborne ball has no trustworthy ground path — a
+cleanly struck 40 m diagonal comes out bent and scores like an aimless deflection.
+Judging it by a test written for rolling balls would penalise it for exactly the
+distortion we have just identified. So gaps flagged `airborne` are tested against
+`--aerial-min-path-coherence` (**default `0.0` = bypassed**) instead.
+
+### The aerial knobs
+
+`--no-aerial` · `--aerial-min-run-frames 8` · `--aerial-max-run-frames 125` ·
+`--aerial-min-curvature 0.02` · `--aerial-min-r2 0.80` ·
+`--aerial-min-amplitude-px 8.0` · `--aerial-min-speed-ms 12.0` ·
+`--aerial-bbox-min-corr 0.30` · `--aerial-min-path-coherence 0.0`
+
+## The possession source is swappable — that is the point
+
+The event layer **never reads the zone detector's internals**. It consumes a
+stream of `(frame, time_s, possessor_id, team, state)` and nothing else:
+
+```python
+class PathCRFPossessionSource(PossessionSource):
+    def stream(self):                      # the whole interface
+        for f, pid, team in self.model.decode():
+            yield PossessionFrame(f, f / self.fps, pid, team, STATE_POSSESSION)
+```
+
+Segments are **derived from the stream** (`segments_from_stream`), not delegated
+to `possession_segments.parquet` — so a new source does not have to produce a
+segments table and *cannot disagree with one*. There is a single definition of a
+segment, and it lives in `source.py`. (The smoke test asserts our derived segments
+match the upstream stage's on the real clip, which is what makes swapping the
+source a *safe* change rather than a hopeful one.)
+
+`ZonePossessionSource` is the milestone-1 source; `cli.py` names it on exactly one
+line.
+
+## The SPADL mapping
+
+Output conforms to `socceraction.spadl.schema.SPADLSchema` (v1.5.3) — verified in
+CI by `tests/test_actions_spadl.py`, which asserts our mirrored enums are
+**identical** to `socceraction.spadl.config`. (Mirroring the vocabulary is what
+keeps the stage free of a `socceraction` runtime dependency; the test is what
+stops the mirror rotting silently, since a reordered enum would turn every
+`type_id` we emit into a *different, valid-looking* action.)
+
+- Coordinates are the **target 105×68 frame**, which **is** SPADL's default pitch
+  — so this layer applies **no rescale at all**. They are clipped into
+  `[0,105]×[0,68]`, because the homography legitimately puts players a metre or
+  two off the pitch and `SPADLSchema` rejects that.
+- Coordinates are **not** normalized left-to-right. Call
+  `spadl.play_left_to_right(actions, home_team_id)` with the `home_team_id`
+  reported in `actions_meta.json` (the team whose `attack_dir` is `+1`).
+- **`SPADLSchema` is `strict`** — an extra column is a hard failure. So the
+  confidence / occlusion flags live in a **separate provenance table keyed by
+  `action_id`** (`spadl_actions_provenance.parquet`): `confidence`, `occluded`,
+  `low_confidence`, `duel_candidate`, ball-path features, and the frames each
+  action came from. `left join` on `action_id` recovers everything.
+
+### Known limitation: bodypart is not observable
+
+There is **no pose data**, so the bodypart cannot be inferred. SPADL has no
+`unknown` bodypart, and socceraction's own converters default to `foot`; we do the
+same (`--bodypart` to override) and say so loudly in `actions_meta.json`. **Do not
+read the bodypart columns as measured.**
+
+## Explicitly NOT emitted (milestone 1)
+
+Only `pass`, `cross`, `dribble`, `interception`, `tackle`, `bad_touch` — and the
+pipeline **raises** if anything else appears (`EMITTED_ACTIONTYPES` in
+`spadl.py`), so a future stage has to widen the scope consciously rather than by
+accident.
+
+| not built | extension point |
+|---|---|
+| **shots** | `transitions.py`, marked `EXTENSION POINT (shots)`. The goal geometry it needs is already computed on every transition (`cfg.goal_xy`, `dist_to_goal_start_m`/`_end_m` in the provenance table). What is missing is a ball-leaves-play signal, not the shape of the code. |
+| **set pieces** | `transitions.py`, marked `EXTENSION POINT (set pieces)`. The prerequisites already emit an `in_play` flag; a gap spanning an out-of-play run restarts the game. Milestone 1 treats every gap as open play. |
+| **duel resolution** | Turnovers out of a *fleeting contested touch* are emitted as seen and flagged `duel_candidate` (8 of 33 actions on the test clip — the possessor flickering between two players in the zone, rather than the ball truly changing hands). A duel resolver should collapse each pair into one won/lost duel. Counted in `actions_meta.json`, so the noise it would remove is **measurable rather than invisible**. |
+| **ballistic height reconstruction** | `aerial.py`, marked `EXTENSION POINT (ballistic reconstruction)`. With the flight frames identified, you could fit `z(t) = z0 + vz·t − g·t²/2` anchored on the two endpoints (which are on the ground, and which we now take from the passer and receiver) and back-project each mid-flight image point onto *that* parabola instead of onto z=0. **Deliberately not built, and not needed:** SPADL actions are start→end, so player-anchoring already keeps the distortion out of xT/VAEP, and there is no consumer in this project for a corrected mid-flight ball position. It would also need camera intrinsics/extrinsics — a homography alone cannot invert a ray to a height. What it *would* unlock: aerial-duel detection, header/volley bodypart inference, shot trajectories over the bar. |
+| **feeding `airborne` back upstream** | `cli.py`, marked `EXTENSION POINT`. Two upstream consumers want it. `smooth_ball` currently deletes flight frames as impossible-speed *outliers* (all of frames 104–122 and 150–165 of the sample clip's aerial pass) and S-G-smooths across the hole; knowing they are airborne it could hold them out as **untrusted** rather than **impossible**. `synth_dead_ball` reads "near a boundary and slow" as a stoppage — a ball in flight over the touchline is neither. **Not wired in:** the prerequisites run *before* the possession stream that says which frames are loose, so this would invert the stage order or force a second prerequisites pass over every clip. That is a pipeline change, not a feature. The flag is computed, persisted (`ball_aerial.parquet`) and joinable on `frame` — whoever takes it on starts from data. |
+
+## Review mode (watch it — the counts can't tell you they're the *right* events)
+
+"33 actions, 10 refused" tells you *how many* events were named, never whether
+they were the **right** ones. Only watching does.
+
+```bash
+python -m src.actions review_actions --in data/gamestate --out data/gamestate \
+    --video data/raw/2e57b9_0.mp4
+# -> actions_review.mp4
+
+# a slice, while you're iterating:
+python -m src.actions review_actions --start-frame 600 --end-frame 750
+```
+
+Per frame it draws:
+
+- the **possessor ringed white** and labelled with its `stable_id`;
+- the **actor of the active action** ringed in that action's colour and labelled
+  with its type;
+- a banner with the action (`type` / `result` / actor / confidence / `OCCLUDED` /
+  `DUEL?`), its subclassification (progressive-lateral-back, short/long, ball
+  distance, path coherence), **and the segment and touch it came from** — so the
+  derivation is on screen, not just the conclusion;
+- a **minimap** in the target 105×68 frame carrying the **action geometry**: the
+  active action as a **start→end arrow**, with the previous few fading behind it,
+  so a passing move reads as a chain. Interceptions and tackles are won *on the
+  spot*, so they draw as a ring rather than an arrow;
+- **three stacked timeline strips — `SEGMENTS` → `TOUCHES` → `ACTIONS`** — which
+  are the whole layer in one picture. Where `TOUCHES` has **fewer boundaries** than
+  `SEGMENTS`, a blip or a knock-and-chase was coalesced away. Where `ACTIONS` is
+  **dark**, the layer **refused to name** that gap.
+
+The arrows are on the minimap and not on the video for a reason: an action is a
+statement about two points in *pitch metres*, and drawing it into the image would
+need a pitch→image homography, which we do not have post-hoc. The video carries
+only what image space can honestly support — who has the ball, and who is acting.
+
+This is the only part of the layer that needs `cv2` (imported lazily, so
+`import src.actions` stays dependency-light).
+
+## On the test clip (2e57b9_0)
+
+23 possession segments → 18 touches → **33 SPADL actions** (11 passes, 10
+dribbles, 4 interceptions, 4 tackles, 4 bad touches), 10 gaps refused. The chain
+is time-ordered and spatially continuous, and loads through `SPADLSchema` with
+zero schema errors.
+
+**Aerial:** 4 of the 19 loose runs come out airborne (**1 full arc**, 3 partial),
+flagging **113 ball frames**; 6 actions cross an airborne gap. The full arc is the
+grounded case the detector was built on and is pinned in the smoke test — the
+~1.1 s aerial pass at **frames 123–150**: `img_y` falls 352 → ~325 and climbs back
+to ~350 (curvature `+0.135`, **R² = 0.992**, apex observed at frame **136.3**),
+apparent ground speed sustained at ~29 m/s, ball loose throughout, and the one bad
+detection at frame 136 robustly rejected. The pass across it takes its endpoints
+from the **passer at frame 101 and the receiver at frame 167** — and the receiver's
+dribble starts at *exactly* the point that pass ended.
+
+**xT cannot be *fitted* on this clip** — and that is expected, not a bug: xT's
+value surface is `P(score | cell)`, estimated from the **shots** in the stream,
+and milestone 1 emits none by design, so the grid comes out all-zero.
+socceraction's `fit()` still ingests the stream and builds a non-degenerate
+move-transition matrix, and `rate()` values **exactly** the 17 successful
+passes/crosses/dribbles and nothing else — which is the real proof that
+socceraction understood our action types as the things we meant them to be.
+
+```bash
+pip install -e ".[dev,spadl]"     # socceraction, for the schema + xT tests
+pytest tests/test_actions*.py
 ```
 
 # Benchmark (Layer 1 quality vs. ground truth)

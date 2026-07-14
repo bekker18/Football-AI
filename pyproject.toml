@@ -14,6 +14,12 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest"]
+# The event layer (src/actions) emits SPADL. socceraction is NOT needed to run it
+# -- the stage is pandas/numpy only -- but the tests use it to pin our mirrored
+# SPADL vocabulary against the real one and to validate the emitted table with
+# SPADLSchema. multimethod>=2 breaks pandera's check backend, which
+# socceraction.spadl imports transitively.
+spadl = ["socceraction>=1.5", "multimethod<2"]
 
 [project.scripts]
 football-ai = "src.cli:main"
@@ -22,6 +28,7 @@ football-ai-eval = "src.eval.cli:main"
 football-ai-events = "src.events.cli:main"
 football-ai-twopass = "src.twopass.cli:main"
 football-ai-possession = "src.possession.cli:main"
+football-ai-actions = "src.actions.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

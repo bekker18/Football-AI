@@ -1,15 +1,41 @@
-# Usage:
-#   docker compose build
-#   docker compose run --rm download                      # one-time: models + sample clip
-#   docker compose run --rm extract                       # runs on the sample clip
+# One Dockerfile, two targets (see the header of ./Dockerfile).
+#
+#   l1  (~3.7 GB)  video -> game state.   Needs torch/YOLO/SigLIP. Slow, GPU-ish.
+#   l2  (~950 MB)  game state -> actions. Pandas only. No GPU, no checkpoints.
+#
+# ---------------------------------------------------------------------------
+# Layer 1 — video in, game state out (run once per clip)
+# ---------------------------------------------------------------------------
+#   docker compose build extract
+#   docker compose run --rm download                  # one-time: models + sample clip
+#   docker compose run --rm extract                   # -> ./data/gamestate
 #   docker compose run --rm extract --source /data/raw/mygame.mp4 --ball --save-video /data/gamestate/annot.mp4
 #
 # Everything lives under one bind mount (./data): input footage in /data/raw,
 # checkpoints in /data/models, results in /data/gamestate.
+#
+# ---------------------------------------------------------------------------
+# Layer 2 — game state in, SPADL actions out (re-run freely; it takes seconds)
+# ---------------------------------------------------------------------------
+#   docker compose build l2
+#   docker compose run --rm prep          # tracking.parquet  -> tracking_prepared.parquet
+#   docker compose run --rm possession    # tracking_prepared -> possession_frames/segments
+#   docker compose run --rm actions       # possession_*      -> spadl_actions* + ball_aerial
+#   docker compose run --rm l2            # the test suite
+#
+# The three stages MUST run in that order — each reads the previous one's output —
+# and each is non-destructive: it only ever writes its own files. Each defaults to
+# `--in data/gamestate --out data/gamestate`; append flags after the service name
+# to override, e.g. `docker compose run --rm actions --no-aerial --out /tmp/out`.
 
 services:
+
+  # ==== Layer 1 =============================================================
   download:
-    build: .
+    build:
+      context: .
+      target: l1
+    image: football-ai-l1
     # Docker keeps everything flat under the /data mount; override the script's
     # default (models/ + data/raw/) so checkpoints and footage land there.
     environment:
@@ -20,7 +46,10 @@ services:
       - ./data:/data
 
   extract:
-    build: .
+    build:
+      context: .
+      target: l1
+    image: football-ai-l1
     volumes:
       - ./data:/data
     # Default command (override anything after `extract` on the CLI).
@@ -29,7 +58,10 @@ services:
   # GPU variant — requires NVIDIA Container Toolkit on the host (more than "just
   # Docker"). Build with the cu121 torch index (see README) before using this.
   extract-gpu:
-    build: .
+    build:
+      context: .
+      target: l1
+    image: football-ai-l1
     volumes:
       - ./data:/data
     command: ["--source", "/data/raw/2e57b9_0.mp4", "--out-dir", "/data/gamestate", "--device", "cuda"]
@@ -40,3 +72,37 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+
+  # ==== Layer 2 =============================================================
+  # The whole repo is mounted at /app (not just ./data) because these stages
+  # import the `src` package — which also means a code edit is live with no
+  # rebuild. The explicit `image:` is what makes the four services SHARE one built
+  # image; without it compose names the image after each service and builds the
+  # same thing four times.
+  l2: &l2
+    build:
+      context: .
+      target: l2
+    image: football-ai-l2
+    volumes:
+      - .:/app
+    working_dir: /app
+
+  # 1. clean the raw game state: stitch ids, resolve direction, smooth the ball,
+  #    flag dead balls, rescale to the target pitch.
+  prep:
+    <<: *l2
+    command: ["python", "-m", "src.prerequisites", "run_prerequisites",
+              "--in", "data/gamestate", "--out", "data/gamestate"]
+
+  # 2. who is on the ball, per frame.
+  possession:
+    <<: *l2
+    command: ["python", "-m", "src.possession", "detect_possession",
+              "--in", "data/gamestate", "--out", "data/gamestate"]
+
+  # 3. possession transitions -> SPADL actions (+ the airborne-ball annotation).
+  actions:
+    <<: *l2
+    command: ["python", "-m", "src.actions", "detect_actions",
+              "--in", "data/gamestate", "--out", "data/gamestate"]
