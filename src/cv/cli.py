@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -72,8 +73,29 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _hf_env(model_dir: str) -> None:
+    """Point Hugging Face at the cache `download_assets.sh` filled, before import.
+
+    ``TeamClassifier`` fetches SigLIP (~813 MB) from the Hub the moment it is
+    constructed — i.e. deep inside phase 1, minutes into a run. Pre-fetched, it is
+    already sitting in ``<model-dir>/hf_cache`` and that construction is offline.
+
+    Xet is Hugging Face's chunked transfer backend for large files. It is fine
+    normally, but on some sandboxes (Kaggle notably) it stalls at 0 B/s while the
+    plain HTTPS CDN — which is what the small ``config.json`` came down over —
+    works, so a run gets 813 MB into nothing and hangs. Opting out costs a little
+    speed and buys a download that actually finishes.
+
+    Both are ``setdefault``: the Docker images set ``HF_HOME`` themselves, and
+    anyone who wants Xet back can export ``HF_HUB_DISABLE_XET=0``.
+    """
+    os.environ.setdefault("HF_HOME", os.path.join(model_dir, "hf_cache"))
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+
+
 def main(argv=None) -> None:
     args = build_parser().parse_args(argv)
+    _hf_env(args.model_dir)
     # Import here so `--help` and arg errors don't pay the heavy CV-stack import.
     from .pipeline import run
 

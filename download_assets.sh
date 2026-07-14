@@ -33,5 +33,39 @@ dl "$MODELS/football-ball-detection.pt"   1isw4wx-MK9h9LMr36VvIWlJD6ppUvw7V
 # One sample broadcast clip to test end to end -> data/raw/ (input data)
 dl "$RAW/2e57b9_0.mp4" 19PGw55V8aA6GZu5-Aac5_9mCy3fNxmEf
 
+# The fourth checkpoint, and the only one that is not a .pt: the SigLIP vision
+# encoder behind roboflow/sports' TeamClassifier. It is NOT on Drive -- sports
+# pulls it from the HF Hub by name, and it does so lazily, when the classifier is
+# CONSTRUCTED. Left to itself that means an 813 MB download starting minutes into
+# a run, in the middle of phase 1, with the video already half-decoded. Pull it
+# here instead, into the cache src/cv/cli.py points HF_HOME at, so the run is
+# offline from there on.
+#
+# HF_HUB_DISABLE_XET: Xet is the Hub's chunked backend for large files; on Kaggle
+# it stalls at 0 B/s (the plain CDN, which serves the small config.json, is fine).
+# Opting out here is what makes this download finish there.
+HF_CACHE="${HF_HOME:-$MODELS/hf_cache}"
+SIGLIP="google/siglip-base-patch16-224"
+if python -c "import huggingface_hub" 2>/dev/null; then
+  echo "↓ caching $SIGLIP into $HF_CACHE ..."
+  HF_HOME="$HF_CACHE" HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}" \
+  SIGLIP="$SIGLIP" python - <<'PY'
+import os
+
+from huggingface_hub import snapshot_download
+
+# safetensors only: the repo also ships .bin / flax / tf weights, which
+# transformers will not touch and which would triple the download.
+path = snapshot_download(
+    os.environ["SIGLIP"],
+    allow_patterns=["*.json", "*.txt", "*.model", "*.safetensors"],
+)
+print(f"✓ {path}")
+PY
+else
+  echo "! huggingface_hub not importable -- skipping $SIGLIP."
+  echo "  (Layer 2 image: expected. Layer 1: the first run will fetch it itself.)"
+fi
+
 echo "Checkpoints in $MODELS, footage in $RAW:"
 ls -lhR "$MODELS" "$RAW"

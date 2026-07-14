@@ -234,6 +234,26 @@ pip install -e ".[dev]"
 pytest
 ```
 
+### Without Docker (Kaggle / Colab)
+
+```bash
+bash download_assets.sh /kaggle/working/Football-AI   # models/ + data/raw/ + SigLIP
+python main.py --source data/raw/2e57b9_0.mp4 --model-dir models \
+               --out-dir data/gamestate --device cuda --ball
+```
+
+**Run the download step first, even if you already have the `.pt` files.** There
+are *four* checkpoints, not three: the team classifier is SigLIP (~813 MB), which
+`roboflow/sports` fetches from the HF Hub by name, lazily, when the classifier is
+constructed — i.e. minutes into a run, in the middle of phase 1. `download_assets.sh`
+pulls it up-front into `<model-dir>/hf_cache`, which is where `src/cv/cli.py` points
+`HF_HOME`, so the run itself needs no Hub access.
+
+The same step also sets `HF_HUB_DISABLE_XET=1`. Xet is the Hub's chunked transfer
+backend for large files; **on Kaggle it stalls at 0 B/s** while the plain CDN (which
+serves the small `config.json`) is fine — so an unprotected run gets 813 MB into
+nothing and hangs. Export `HF_HUB_DISABLE_XET=0` to opt back in.
+
 ## Hand-off downstream
 
 `tracking.parquet` is the raw game state. A downstream adapter reshapes it into
