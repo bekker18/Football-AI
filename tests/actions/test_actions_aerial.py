@@ -30,7 +30,7 @@ import pytest
 
 from src.actions import ZonePossessionSource, detect_actions, run_stages
 from src.actions.aerial import ARC_FULL, detect_airborne
-from tests.actions_helpers import (
+from tests.actions.actions_helpers import (
     FPS,
     aerial_img_y,
     ball_line,

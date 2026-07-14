@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from src.geometry import to_pitch_m
+from src.cv.geometry import to_pitch_m
 
 
 class _FakeTransformer:

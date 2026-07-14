@@ -47,7 +47,7 @@ from .config import (
 from .zone import ball_to_player_distances
 
 # --- palette (BGR, for cv2) ------------------------------------------------ #
-# team colours match src/annotate.py's so the two overlays read the same way.
+# team colours match src/cv/annotate.py's so the two overlays read the same way.
 TEAM_BGR = {0.0: (147, 20, 255), 1.0: (255, 191, 0)}  # pink / deep-sky-blue
 UNKNOWN_BGR = (128, 128, 128)
 BALL_BGR = (255, 255, 255)

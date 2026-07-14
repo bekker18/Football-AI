@@ -1,6 +1,6 @@
 """Tests for the pure team-voting logic (no CV stack required)."""
 
-from src.teams import majority_vote_teams
+from src.cv.teams import majority_vote_teams
 
 
 def test_majority_vote_locks_track_to_mode():

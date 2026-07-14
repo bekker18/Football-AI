@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Optional
 
-# Reserved object_id for the ball in Layer 1 output (see src/config.py). Defined
+# Reserved object_id for the ball in Layer 1 output (see src/cv/config.py). Defined
 # locally so importing this package never pulls in the CV stack.
 BALL_OBJECT_ID = 0
 

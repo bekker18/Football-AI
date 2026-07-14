@@ -1,24 +1,23 @@
-"""Layer 1 — CV extraction: soccer video -> structured per-frame game state.
+"""The football-ai package: one subpackage per stage.
 
-The heavy pieces (torch / ultralytics / supervision / roboflow-sports) are only
-imported when you actually run the pipeline, so ``import src`` stays cheap. Use
-the submodules directly, or the lazy attributes below:
+Layer 1 (pixels)::
 
-    from src import run, main   # run(args) / CLI entry point
+    cv/             video -> raw game state (torch / YOLO / SigLIP)
+
+Layer 2 (tables in, tables out — no pixels, no GPU)::
+
+    prerequisites/  raw game state -> event-ready game state
+    possession/     per-frame ball possessor
+    actions/        possession transitions -> SPADL actions
+    events/         ball-free high-value windows (Door 2)
+    twopass/        the ball-only-where-it-matters controller
+    eval/           detection/tracking metrics against SoccerNet GSR
+
+Nothing is imported here: ``import src`` must stay free of the heavy Layer 1
+stack so the Layer 2 image (no torch, no checkpoints) can import its own
+subpackages. Reach for the stage you want, e.g. ``from src.cv import run``.
 """
 
 from __future__ import annotations
 
 __version__ = "0.1.0"
-
-
-def __getattr__(name):  # PEP 562: keep top-level import free of heavy deps
-    if name == "main":
-        from .cli import main
-
-        return main
-    if name == "run":
-        from .pipeline import run
-
-        return run
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

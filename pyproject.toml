@@ -22,7 +22,7 @@ dev = ["pytest"]
 spadl = ["socceraction>=1.5", "multimethod<2"]
 
 [project.scripts]
-football-ai = "src.cli:main"
+football-ai = "src.cv.cli:main"
 football-ai-prep = "src.prerequisites.cli:main"
 football-ai-eval = "src.eval.cli:main"
 football-ai-events = "src.events.cli:main"

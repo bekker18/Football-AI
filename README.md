@@ -173,15 +173,16 @@ The logic lives in the `src` package (installable via `pyproject.toml`);
 
 ```
 src/
-  config.py      class ids, pitch geometry, coordinate-system constants
-  geometry.py    homography build + image→pitch-metres conversion
-  detection.py   player/jersey crop helpers for the team classifier
-  teams.py       goalkeeper assignment + per-track majority vote
-  ball.py        optional tiled ball detector (BallDetector)
-  annotate.py    optional annotated-video overlay (VideoAnnotator)
-  outputs.py     writing parquet/csv/jsonl/meta + version capture
-  pipeline.py    run(args): the two-phase extraction orchestration (+ --prepare)
-  cli.py         argument parser + entry point
+  cv/            Layer 1: video -> raw game state (the only half that sees pixels)
+    config.py      class ids, pitch geometry, coordinate-system constants
+    geometry.py    homography build + image→pitch-metres conversion
+    detection.py   player/jersey crop helpers for the team classifier
+    teams.py       goalkeeper assignment + per-track majority vote
+    ball.py        optional tiled ball detector (BallDetector)
+    annotate.py    optional annotated-video overlay (VideoAnnotator)
+    outputs.py     writing parquet/csv/jsonl/meta + version capture
+    pipeline.py    run(args): the two-phase extraction orchestration (+ --prepare)
+    cli.py         argument parser + entry point (python -m src.cv)
   prerequisites/ raw game state -> event-ready game state (see below)
     stitch.py      track id stabilization (motion stitching)
     direction.py   team attacking-direction resolution
@@ -209,16 +210,21 @@ src/
     review.py      actions-review video overlay (the only cv2 dependency)
     pipeline.py    detect_actions(source, tracking, cfg): the one call
     cli.py         argument parser + entry point (python -m src.actions)
-main.py                 thin launcher -> src.cli:main (Kaggle-friendly)
-tests/                  unit tests for the pure logic (teams, geometry, prereqs)
+main.py                 thin launcher -> src.cv.cli:main (Kaggle-friendly)
+tests/                  unit tests for the pure logic, one folder per module
+  cv/                     teams, geometry
+  prerequisites/          stitch, direction, rescale, ball, deadball, pipeline
+  possession/             zone/segments, review overlay, smoke
+  actions/                transitions, aerial, SPADL contract, review, smoke
+  events/  twopass/  eval/
 ```
 
 Run it three equivalent ways:
 
 ```bash
-python main.py    --source ... --out-dir ...   # launcher (no install)
-python -m src.cli --source ... --out-dir ...   # module
-football-ai       --source ... --out-dir ...   # console script (after pip install .)
+python main.py   --source ... --out-dir ...   # launcher (no install)
+python -m src.cv --source ... --out-dir ...   # module
+football-ai      --source ... --out-dir ...   # console script (after pip install .)
 ```
 
 Dev setup and tests (the pure-logic tests need only numpy + pytest, not the CV stack):
@@ -339,7 +345,7 @@ Run the tests (pandas + scipy + pytest; the smoke test needs the sample
 `data/gamestate/tracking.parquet` and is skipped otherwise):
 
 ```bash
-pytest tests/test_prereq_*.py
+pytest tests/prerequisites
 ```
 
 # Possession zone (Layer 2 — who is on the ball?)
@@ -473,7 +479,7 @@ This is the only part of the layer that needs `cv2` (imported lazily, so
 `annotated.mp4` also works, but the overlays stack — prefer the raw clip.
 
 ```bash
-pytest tests/test_possession*.py
+pytest tests/possession
 ```
 
 # Event layer (Layer 2 — possession transitions → SPADL actions)
@@ -725,7 +731,7 @@ line.
 ## The SPADL mapping
 
 Output conforms to `socceraction.spadl.schema.SPADLSchema` (v1.5.3) — verified in
-CI by `tests/test_actions_spadl.py`, which asserts our mirrored enums are
+CI by `tests/actions/test_actions_spadl.py`, which asserts our mirrored enums are
 **identical** to `socceraction.spadl.config`. (Mirroring the vocabulary is what
 keeps the stage free of a `socceraction` runtime dependency; the test is what
 stops the mirror rotting silently, since a reordered enum would turn every
@@ -833,7 +839,7 @@ socceraction understood our action types as the things we meant them to be.
 
 ```bash
 pip install -e ".[dev,spadl]"     # socceraction, for the schema + xT tests
-pytest tests/test_actions*.py
+pytest tests/actions
 ```
 
 # Benchmark (Layer 1 quality vs. ground truth)

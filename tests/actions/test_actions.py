@@ -20,7 +20,7 @@ import pytest
 
 from src.actions import ZonePossessionSource, detect_actions, segments_from_stream
 from src.actions.spadl import EMITTED_ACTIONTYPES, SPADL_COLUMNS
-from tests.actions_helpers import (
+from tests.actions.actions_helpers import (
     ball_line,
     ball_still,
     config,

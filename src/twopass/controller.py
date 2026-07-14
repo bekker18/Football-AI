@@ -43,9 +43,9 @@ def run_ball_on_frames(
     import supervision as sv
     from ultralytics import YOLO
 
-    from src import config as l1cfg
-    from src.ball import BallDetector
-    from src.geometry import build_transformer, to_pitch_m
+    from src.cv import config as l1cfg
+    from src.cv.ball import BallDetector
+    from src.cv.geometry import build_transformer, to_pitch_m
 
     target = set(int(f) for f in frames)
     if not target:
