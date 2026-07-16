@@ -340,6 +340,11 @@ def smooth_ball(df: pd.DataFrame, cfg: PrepConfig) -> Tuple[pd.DataFrame, dict]:
 
     if new_rows:
         add = pd.DataFrame(new_rows)
+        # Drop all-NA columns from the synthetic rows before concat: pandas>=2.1 warns
+        # (and will change behaviour) about all-NA entries participating in dtype
+        # inference. The union of columns is unchanged — a dropped column is simply
+        # backfilled with NA in the appended rows, which is what it held anyway.
+        add = add.dropna(axis=1, how="all")
         df = pd.concat([df, add], ignore_index=True)
         # restore dtypes that a concat with fresh rows can disturb
         df["object_id"] = df["object_id"].astype("Int64")

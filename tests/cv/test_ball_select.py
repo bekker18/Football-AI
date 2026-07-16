@@ -137,6 +137,106 @@ def test_resting_on_pitch_ball_beats_static_off_pitch_ball():
 
 
 # --------------------------------------------------------------------------- #
+# the "being played" signals: distance-to-player and trajectory physics
+# --------------------------------------------------------------------------- #
+def _players(frames, xy, n=6, spread=3.0, seed=1):
+    """A cluster of n players around ``xy`` on every frame -> {frame: (n, 2) array}."""
+    rng = np.random.default_rng(seed)
+    base = np.array(xy, dtype=float)
+    return {int(f): base + rng.normal(0, spread, size=(n, 2)) for f in frames}
+
+
+def test_static_on_pitch_ball_far_from_players_is_rejected():
+    """The real-footage failure mode. A static spare resting just INSIDE the goal
+    line — on the pitch, barely moving, but ~20 m from anyone — scores well on
+    motion + on-pitch and gets locked onto for hundreds of frames. Distance to the
+    nearest player is what vetoes it."""
+    players = _players(range(80), (60.0, 35.0))         # play in the centre
+    spare = _static_ball(80, 117.0, 17.0)               # on pitch, far corner
+    game = [_cand(f, 58.0 + 0.2 * f, 35.0) for f in range(80)]  # among the players
+    sel, _, _ = select_in_play_ball(spare + game, _cfg(), players)
+
+    game_ids = {c.track_id for c in game}
+    picked = {s.track_id for s in sel if s.cand is not None}
+    assert picked, "nothing selected"
+    assert picked <= game_ids, "locked onto the static on-pitch spare"
+
+
+def test_moving_inbounds_ball_far_from_players_is_not_in_play():
+    """A spare ball kicked along an empty flank is moving AND inbounds, so motion +
+    on-pitch rate it highly — but it is nowhere near the play, so it is not the ball
+    being played and nothing should be selected."""
+    players = _players(range(80), (60.0, 35.0))
+    stray = [_cand(f, 10.0, 5.0 + 0.3 * f) for f in range(80)]  # moving, inbounds, far
+    sel, _, _ = select_in_play_ball(stray, _cfg(), players)
+    assert all(s.cand is None for s in sel), "selected a moving ball far from the play"
+
+
+def test_distance_signal_is_dropped_when_no_players_given():
+    """Backward compatibility: with no player positions the selector must behave as
+    the motion + on-pitch predecessor did (the whole existing suite runs this way)."""
+    resting = _static_ball(80, 60.0, 35.0)
+    sel, _, _ = select_in_play_ball(resting, _cfg())  # no players
+    assert any(s.cand is not None for s in sel), "resting on-pitch ball was dropped"
+
+
+def test_physics_factor_penalises_a_teleporting_track():
+    from src.cv.ball_select import _physics_factor
+
+    cfg = _cfg()
+    coherent = [_cand(f, 40.0 + 0.3 * f, 35.0) for f in range(20)]
+    tele = [_cand(f, 40.0 if f % 2 == 0 else 80.0, 35.0) for f in range(20)]
+    assert _physics_factor(coherent, cfg) == 1.0
+    assert _physics_factor(tele, cfg) <= cfg.physics_floor + 1e-9
+
+
+# --------------------------------------------------------------------------- #
+# following a fragmented ball across track ids, and bridging short dropouts
+# --------------------------------------------------------------------------- #
+def test_selection_rides_fragmented_ball_across_track_ids():
+    """A fast, occluded game ball is broken into a chain of short tracks. Selection
+    must ride the chain as one ball, bridging the frames in between (which here hold
+    only a spare) instead of dropping to null or onto the spare."""
+    frames_ball = list(range(0, 21)) + list(range(30, 51))  # detector drops 21..29
+    ball = [_cand(f, 50.0 + 0.3 * f, 35.0) for f in frames_ball]
+    spare = [_cand(f, 117.0, 17.0) for f in range(21, 30)]  # only a spare in the gap
+    players = _players(range(51), (55.0, 35.0), spread=6.0)
+    sel, tracks, _ = select_in_play_ball(ball + spare, _cfg(), players)
+
+    assert len({c.track_id for c in ball}) >= 2, "expected the ball to fragment"
+    by = {s.frame: s for s in sel}
+    spare_ids = {c.track_id for c in spare}
+    assert not (spare_ids & {s.track_id for s in sel if s.cand is not None}), \
+        "selected the spare in the gap"
+    for f in range(21, 30):
+        assert by[f].bridged, f"gap frame {f} was not bridged"
+
+
+def test_holds_lock_and_does_not_flicker_between_two_in_play_balls():
+    """This footage has several balls on the pitch at once. When the tracked ball
+    drops for a few frames, selection must hold (and bridge) its trajectory, not
+    teleport onto a second in-play ball elsewhere."""
+    players = _players(range(60), (56.0, 37.0), spread=9.0)  # covers both balls
+    a = [_cand(f, 50.0, 35.0) for f in range(60) if not (25 <= f <= 29)]  # drops 25..29
+    b = [_cand(f, 62.0, 40.0) for f in range(60)]  # a second ball, ~13 m away
+    sel, _, _ = select_in_play_ball(a + b, _cfg(), players)
+
+    cfg = _cfg()
+    seq = [
+        (s.frame,
+         s.cand.pitch_x if s.cand is not None else s.pitch_x,
+         s.cand.pitch_y if s.cand is not None else s.pitch_y)
+        for s in sorted(sel, key=lambda s: s.frame)
+        if s.cand is not None or s.bridged
+    ]
+    for (f0, x0, y0), (f1, x1, y1) in zip(seq, seq[1:]):
+        if f1 - f0 == 1:
+            reach = cfg.ball_max_speed_ms / cfg.fps + cfg.continuity_slack_m
+            assert np.hypot(x1 - x0, y1 - y0) <= reach + 1e-6, \
+                f"flickered between two balls at frame {f0}->{f1}"
+
+
+# --------------------------------------------------------------------------- #
 # null output is a legitimate answer
 # --------------------------------------------------------------------------- #
 def test_occluded_frames_emit_null_not_a_substitute():

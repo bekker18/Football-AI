@@ -336,21 +336,51 @@ def _select_ball(args, fps, ball_cands, rows, frames_jsonl):
         pitch_len_m=config.PITCH_LEN_M,
         pitch_wid_m=config.PITCH_WID_M,
     )
-    selections, tracks, scores = select_in_play_ball(ball_cands, cfg)
+    # Player positions per frame drive the distance-to-player ("being played")
+    # signal. Built here from the already-projected person rows — outfielders and
+    # keepers, referees excluded (a ball resting by the far-side official is not in
+    # play). Referees also loiter off the touchline where spare balls sit, so
+    # including them would blunt the very signal that rejects those spares.
+    player_pos_by_frame: dict = {}
+    for r in rows:
+        if r["role"] in ("player", "goalkeeper") and r["pitch_valid"]:
+            player_pos_by_frame.setdefault(r["frame"], []).append(
+                (r["pitch_x_m"], r["pitch_y_m"])
+            )
+    player_pos_by_frame = {
+        f: np.asarray(v, dtype=float) for f, v in player_pos_by_frame.items()
+    }
+    selections, tracks, scores = select_in_play_ball(
+        ball_cands, cfg, player_pos_by_frame
+    )
 
     objs_by_frame = {rec["frame"]: rec["objects"] for rec in frames_jsonl}
     n_sel = 0
+    n_bridged = 0
     for s in selections:
-        if s.cand is None:
+        if s.cand is None and not s.bridged:
             continue  # no in-play ball this frame: null is the correct answer
-        c = s.cand
+        if s.cand is not None:
+            c = s.cand
+            bbox = c.bbox
+            img_x, img_y = c.img_x, c.img_y
+            px, py, pv = c.pitch_x, c.pitch_y, c.pitch_valid
+            bridged = False
+        else:
+            # bridged frame: no detection, position linearly interpolated across a
+            # short same-ball dropout. Synthesise a nominal bbox around the point so
+            # the row (and the review overlay) has something to draw.
+            img_x, img_y = s.img_x, s.img_y
+            px, py, pv = s.pitch_x, s.pitch_y, True
+            bbox = (img_x - 8.0, img_y - 8.0, img_x + 8.0, img_y + 8.0)
+            bridged = True
         row = _build_row(
             s.frame,
             round(s.frame / fps, 4),
             config.BALL_OBJECT_ID,
             "ball",
             None,
-            c.bbox,
+            bbox,
             None,  # pitch coords are overwritten below from the centre anchor
         )
         # Keep the centre-anchored position from selection, image AND pitch, so the
@@ -358,18 +388,22 @@ def _select_ball(args, fps, ball_cands, rows, frames_jsonl):
         # pitch_x_m/pitch_y_m). _build_row's bottom-edge anchor is right for people
         # — that is where their feet meet the pitch — but wrong for a ball, which
         # spends much of the match off the ground.
-        row["img_x"] = round(c.img_x, 2)
-        row["img_y"] = round(c.img_y, 2)
-        row["pitch_x_m"] = round(c.pitch_x, 3) if c.pitch_valid else None
-        row["pitch_y_m"] = round(c.pitch_y, 3) if c.pitch_valid else None
-        row["pitch_valid"] = c.pitch_valid
+        row["img_x"] = round(img_x, 2)
+        row["img_y"] = round(img_y, 2)
+        row["pitch_x_m"] = round(px, 3) if pv else None
+        row["pitch_y_m"] = round(py, 3) if pv else None
+        row["pitch_valid"] = bool(pv)
         row["ball_sel_score"] = round(float(s.score), 4)
         row["ball_sel_margin"] = round(float(s.margin), 4)
         row["ball_track_id"] = int(s.track_id)
+        row["ball_bridged"] = bridged
         rows.append(row)
         if s.frame in objs_by_frame:
             objs_by_frame[s.frame].append(row)
-        n_sel += 1
+        if bridged:
+            n_bridged += 1
+        else:
+            n_sel += 1
 
     sel_key = {(s.track_id, s.frame) for s in selections if s.cand is not None}
     debug = [
@@ -407,13 +441,33 @@ def _select_ball(args, fps, ball_cands, rows, frames_jsonl):
                 if c.track_id in scores
                 else None
             ),
+            track_dist=(
+                round(float(scores[c.track_id].dist), 4)
+                if c.track_id in scores
+                else None
+            ),
+            track_physics=(
+                round(float(scores[c.track_id].physics), 4)
+                if c.track_id in scores
+                else None
+            ),
+            track_player_dist_m=(
+                round(float(scores[c.track_id].player_dist_m), 3)
+                if c.track_id in scores
+                and np.isfinite(scores[c.track_id].player_dist_m)
+                else None
+            ),
         )
         for c in ball_cands
     ]
 
     n_frames_with_cands = len({c.frame for c in ball_cands})
     meta = dict(
-        method="multi-candidate track scoring (motion energy + on-pitch fraction)",
+        method=(
+            "multi-candidate track scoring (motion + on-pitch base, "
+            "* distance-to-player being-played factor * trajectory physics factor), "
+            "emitted by positional continuity across fragments"
+        ),
         mode=cfg.mode,
         window_frames=cfg.window_frames,
         min_score=cfg.min_score,
@@ -421,17 +475,21 @@ def _select_ball(args, fps, ball_cands, rows, frames_jsonl):
         n_candidate_tracks=len(tracks),
         n_frames_with_candidates=n_frames_with_cands,
         n_frames_ball_selected=n_sel,
+        n_frames_ball_bridged=n_bridged,
         note=(
             "one in-play ball per frame in tracking.parquet; every candidate "
-            "(selected or not) in ball_candidates.parquet. Frames where no track "
-            "cleared min_score, or where the winning track had no detection, emit "
-            "NO ball row — null is a legitimate answer and feeds the gap handling "
-            "in prerequisites.ball."
+            "(selected or not) in ball_candidates.parquet with its scoring signals. "
+            "The in-play ball follows the nearest continuous detection across "
+            "fragmented tracks; short same-ball dropouts are bridged (ball_bridged), "
+            "and genuine absences (only spare/off-pitch candidates, or the ball "
+            "off-screen) emit NO ball row — null feeds the gap handling in "
+            "prerequisites.ball."
         ),
     )
     print(
         f"[ball] {len(ball_cands)} candidates -> {len(tracks)} tracks; "
-        f"in-play ball on {n_sel}/{n_frames_with_cands} candidate frames"
+        f"in-play ball on {n_sel}/{n_frames_with_cands} candidate frames "
+        f"(+{n_bridged} bridged)"
     )
     return debug, meta
 

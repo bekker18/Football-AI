@@ -137,8 +137,13 @@ def _draw_minimap(cv2, cfg, people, ball_xy, possessor_id, state):
                    STATE_BGR.get(state, UNKNOWN_BGR), 1)
 
     for r in people.itertuples():
-        px, py = pitch_to_px(getattr(r, COL_PITCH_X_T), getattr(r, COL_PITCH_Y_T),
-                             scale, pad)
+        x_t, y_t = getattr(r, COL_PITCH_X_T), getattr(r, COL_PITCH_Y_T)
+        # Frames whose homography failed (pitch_valid=False on pan/zoom/replay)
+        # carry NaN target coords; they have no place on the top-down minimap.
+        # The on-image overlay still shows them -- it uses pixel coords.
+        if pd.isna(x_t) or pd.isna(y_t):
+            continue
+        px, py = pitch_to_px(x_t, y_t, scale, pad)
         sid = getattr(r, COL_STABLE_ID)
         is_possessor = possessor_id is not None and sid == possessor_id
         cv2.circle(mm, (px, py), 4, team_color(r.team), -1)
