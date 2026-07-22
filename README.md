@@ -58,8 +58,36 @@ override:
 ```bash
 docker compose run --rm possession --r_pz 2.5
 docker compose run --rm actions --out /tmp/out --min-gap-frames 3 --no-aerial
-docker compose run --rm actions review_actions --video data/raw/2e57b9_0.mp4
 ```
+
+### Visualize (review overlays)
+
+Each layer can render an **overlay video** to eyeball the numbers — the counts can
+tell you *how many* events were named, never whether they were the *right* ones.
+These run in the `l2` image but need the source clip and `cv2`, so drive them
+through the `l2` service with the full command (the `possession` / `actions`
+services hardcode `detect_*`, so append to `l2`, not to them):
+
+```bash
+# who is on the ball, per frame          -> data/gamestate/possession_review.mp4
+docker compose run --rm l2 python -m src.possession review_possession \
+    --in data/gamestate --out data/gamestate --video data/raw/2e57b9_0.mp4
+
+# possession transitions -> SPADL actions -> data/gamestate/actions_review.mp4
+docker compose run --rm l2 python -m src.actions review_actions \
+    --in data/gamestate --out data/gamestate --video data/raw/2e57b9_0.mp4
+
+# in-play ball selection (needs --ball)   -> data/gamestate/ball_review.mp4
+docker compose run --rm l2 python -m src.cv.review \
+    --in data/gamestate --source data/raw/2e57b9_0.mp4 \
+    --out-video data/gamestate/ball_review.mp4
+```
+
+Swap `2e57b9_0.mp4` for your own clip (the one named in `meta.json`). While
+iterating, `review_possession` / `review_actions` take `--start-frame` /
+`--end-frame` to render just a slice. Layer 1's own `annotated.mp4` (raw
+detections/tracks) comes from `extract --save-video`. Each review mode is
+documented in full in its layer's section below.
 
 ## The two images
 
