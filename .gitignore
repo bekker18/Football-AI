@@ -13,6 +13,7 @@ data/gamestate/*
 *.pt              # YOLO checkpoints
 *.mp4             # videos
 !IMG_4164.MP4
+!Real-Milan.mp4
 *.avi
 *.mov
 *.mkv
